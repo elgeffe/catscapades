@@ -1,5 +1,12 @@
 export class TinyAudio {
   private context: AudioContext | null = null;
+  private output: GainNode | null = null;
+  private volume = 0.64;
+
+  setVolume(master: number, effects: number): void {
+    this.volume = Math.max(0, Math.min(1, master * effects));
+    if (this.output && this.context) this.output.gain.setTargetAtTime(this.volume, this.context.currentTime, 0.02);
+  }
 
   unlock(): void {
     if (!this.context) this.context = new AudioContext();
@@ -19,7 +26,7 @@ export class TinyAudio {
     gain.gain.setValueAtTime(0.0001, now);
     gain.gain.exponentialRampToValueAtTime(0.18, now + 0.035);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.46);
-    oscillator.connect(gain).connect(ctx.destination);
+    oscillator.connect(gain).connect(this.getOutput(ctx));
     oscillator.start(now);
     oscillator.stop(now + 0.48);
   }
@@ -43,7 +50,7 @@ export class TinyAudio {
     filter.Q.value = 0.7;
     gain.gain.setValueAtTime(0.22, now);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
-    source.connect(filter).connect(gain).connect(ctx.destination);
+    source.connect(filter).connect(gain).connect(this.getOutput(ctx));
     source.start(now);
   }
 
@@ -59,7 +66,7 @@ export class TinyAudio {
       gain.gain.setValueAtTime(0.0001, now + offset);
       gain.gain.exponentialRampToValueAtTime(0.12, now + offset + 0.02);
       gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.3);
-      oscillator.connect(gain).connect(ctx.destination);
+      oscillator.connect(gain).connect(this.getOutput(ctx));
       oscillator.start(now + offset);
       oscillator.stop(now + offset + 0.32);
     });
@@ -68,5 +75,14 @@ export class TinyAudio {
   private getContext(): AudioContext | null {
     this.unlock();
     return this.context;
+  }
+
+  private getOutput(context: AudioContext): GainNode {
+    if (!this.output) {
+      this.output = context.createGain();
+      this.output.gain.value = this.volume;
+      this.output.connect(context.destination);
+    }
+    return this.output;
   }
 }
