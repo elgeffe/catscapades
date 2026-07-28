@@ -14,7 +14,7 @@ renderer.toneMappingExposure = 1.05;
 
 let settings = loadSettings();
 const input = new InputController((method) => document.body.dataset.input = method);
-const game = new CatscapadesGame(
+const game = await CatscapadesGame.create(
   renderer,
   requireElement("#objectives"),
   requireElement("#prompt"),
@@ -55,6 +55,11 @@ const bindSettings = (): void => {
   effects.addEventListener("input", update);
 };
 bindSettings();
+
+// Development-only handle used by the capture tooling in `scripts/`.
+if (import.meta.env.DEV) {
+  (window as unknown as { __catscapades?: unknown }).__catscapades = game;
+}
 
 const startScreen = requireElement("#start-screen");
 requireElement<HTMLButtonElement>("#start-button").addEventListener("click", () => {
