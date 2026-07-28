@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import type { InputFrame } from "./input";
 import { TinyAudio } from "./audio";
+import type { GameSettings } from "./settings";
+import { selectCameraZone } from "./core/gameplay";
 
 type ZoneId = "garden" | "kitchen" | "dining";
 type OwnerState = "routine" | "investigating" | "returning";
@@ -34,7 +36,10 @@ interface Objective {
   id: string;
   text: string;
   complete: boolean;
+  optional?: boolean;
 }
+
+interface CarryItem { id: string; label: string; mesh: THREE.Object3D; home: THREE.Vector3; }
 
 interface DynamicProp {
   id: string;
@@ -80,13 +85,19 @@ export class CatSchemerGame {
   private readonly colliders: RectCollider[] = [];
   private readonly supports: SupportSurface[] = [];
   private readonly props: DynamicProp[] = [];
+  private readonly carryItems: CarryItem[] = [];
   private readonly zones: Record<ZoneId, CameraZone>;
   private readonly objectives: Objective[] = [
-    { id: "enter", text: "Slip into the kitchen", complete: false },
-    { id: "distract", text: "Distract the owner with a meow", complete: false },
-    { id: "mug", text: "Swipe the red mug off the table", complete: false },
+    { id: "enter", text: "Get inside", complete: false },
+    { id: "distract", text: "Create a distraction", complete: false },
     { id: "key", text: "Steal the brass key", complete: false },
-    { id: "innocent", text: "Return to the box and act innocent", complete: false },
+    { id: "prepare", text: "Prepare two disasters (0/2)", complete: false },
+    { id: "catastrophe", text: "Trigger the breakfast catastrophe", complete: false },
+    { id: "innocent", text: "Return to the box and pretend to sleep", complete: false },
+    { id: "sock-sink", text: "Secret: put the sock in the sink", complete: false, optional: true },
+    { id: "fruit", text: "Secret: sit in the fruit bowl", complete: false, optional: true },
+    { id: "key-box", text: "Secret: bring the key to the box", complete: false, optional: true },
+    { id: "uncaught", text: "Secret: finish without being caught", complete: false, optional: true },
   ];
 
   private currentZone: ZoneId = "garden";
@@ -101,7 +112,16 @@ export class CatSchemerGame {
   private swipeTimer = 0;
   private meowTimer = 0;
   private elapsed = 0;
-  private carryingKey = false;
+  private carryingItem: CarryItem | null = null;
+  private readonly preparations = new Set<string>();
+  private displayedPreparationCount = -1;
+  private sinkRunning = false;
+  private catastrophe = false;
+  private caughtCount = 0;
+  private paused = false;
+  private debugVisible = false;
+  private inputMethod: InputFrame["method"] = "keyboard";
+  private settings: GameSettings = { masterVolume: .8, effectsVolume: .8, graphics: "high", reducedMotion: false, highContrast: false };
   private started = false;
   private completed = false;
   private caughtCooldown = 0;
@@ -168,6 +188,17 @@ export class CatSchemerGame {
     this.lastFrameTime = performance.now() / 1000;
   }
 
+  hasStarted(): boolean { return this.started; }
+  setPaused(value: boolean): void { this.paused = value; this.lastFrameTime = performance.now() / 1000; }
+  toggleDebug(): void { this.debugVisible = !this.debugVisible; document.querySelector("#debug-panel")?.classList.toggle("visible", this.debugVisible); }
+  applySettings(settings: GameSettings): void {
+    this.settings = settings;
+    this.audio.setVolume(settings.masterVolume, settings.effectsVolume);
+    this.renderer.shadowMap.enabled = settings.graphics === "high";
+    document.body.classList.toggle("high-contrast", settings.highContrast);
+    this.resize();
+  }
+
   restart(): void {
     window.location.reload();
   }
@@ -177,7 +208,8 @@ export class CatSchemerGame {
     const frameDelta = Math.min(0.05, now - this.lastFrameTime);
     this.lastFrameTime = now;
 
-    if (this.started && !this.completed) {
+    this.inputMethod = input.method;
+    if (this.started && !this.completed && !this.paused) {
       this.accumulator += frameDelta;
       let firstStep = true;
       while (this.accumulator >= FIXED_STEP) {
@@ -192,6 +224,7 @@ export class CatSchemerGame {
 
     this.updateCamera(frameDelta);
     this.updateVisuals(frameDelta);
+    this.updateDebug(frameDelta);
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -214,11 +247,11 @@ export class CatSchemerGame {
   }
 
   private handleActions(input: InputFrame): void {
-    if (input.meowPressed && this.meowTimer <= 0) {
+    if (input.meowPressed && this.meowTimer <= 0 && !this.carryingItem) {
       this.meowTimer = 0.85;
       this.audio.meow();
       this.alertOwner(this.catPosition, "meow");
-      if (!this.objectives[1]?.complete) this.completeObjective("distract", "The human has taken the bait.");
+      this.completeObjective("distract", "The homeowner has taken the bait.");
     }
 
     if (input.pouncePressed && this.pounceCooldown <= 0) {
@@ -229,7 +262,8 @@ export class CatSchemerGame {
     }
 
     if (input.actionPressed && this.swipeTimer <= 0) {
-      if (this.tryKeyInteraction()) return;
+      if (this.trySpecialInteraction()) return;
+      if (this.tryCarryInteraction()) return;
       if (this.tryActInnocent()) return;
       this.swipeTimer = 0.34;
       this.swipeNearestProp();
@@ -250,7 +284,7 @@ export class CatSchemerGame {
     const inputMagnitude = Math.min(1, this.moveDirection.length());
     if (inputMagnitude > 0.001) this.moveDirection.normalize();
 
-    const baseSpeed = input.run ? 5.5 : 3.5;
+    const baseSpeed = (input.stalk ? 2.05 : input.run ? 5.5 : 3.5) * (this.carryingItem ? 0.84 : 1);
     const targetVelocity = this.moveDirection.multiplyScalar(baseSpeed * inputMagnitude);
     const acceleration = inputMagnitude > 0 ? 19 : 25;
     this.catVelocity.x = damp(this.catVelocity.x, targetVelocity.x, acceleration, dt);
@@ -346,17 +380,31 @@ export class CatSchemerGame {
 
   private updateObjectives(): void {
     const mug = this.props.find((prop) => prop.id === "red-mug");
-    if (mug?.disturbed && mug.mesh.position.y < 1.0 && !this.objectives[2]?.complete) {
-      this.completeObjective("mug", "Breakfast has suffered a structural failure.");
+    if (mug?.disturbed && mug.mesh.position.y < 1.0 && this.preparations.size >= 2 && !this.catastrophe) {
+      this.catastrophe = true;
+      this.completeObjective("catastrophe", "FLOUR! WATER! CROCKERY! A perfectly ruined morning.");
+      this.audio.success();
     }
+    if (this.carryingItem?.id === "key" && this.catPosition.distanceTo(this.boxPosition) < 1.7) this.completeObjective("key-box", "The key has joined the outdoor collection.");
+    if (this.catPosition.distanceTo(new THREE.Vector3(10.3, 0, 2.1)) < .85 && this.pounceTimer > 0) this.completeObjective("fruit", "The fruit bowl has improved immeasurably.");
+    const prepare = this.objectives.find((objective) => objective.id === "prepare");
+    if (prepare && !prepare.complete) prepare.text = `Prepare two disasters (${Math.min(2, this.preparations.size)}/2)`;
+    if (this.preparations.size >= 2) this.completeObjective("prepare", "The trap is set. Swipe the red mug to begin the finale.");
+    else if (this.displayedPreparationCount !== this.preparations.size) {
+      this.displayedPreparationCount = this.preparations.size;
+      this.renderObjectives();
+    }
+    if (this.completed && this.caughtCount === 0) this.completeObjective("uncaught", "Untouched. Uncatchable. Unreasonably smug.");
   }
 
+  private markPreparation(id: string, message: string): void {
+    if (this.preparations.has(id)) return;
+    this.preparations.add(id);
+    this.showToast(message);
+    this.alertOwner(this.catPosition, "swipe");
+  }
   private updateZone(): void {
-    let next = this.currentZone;
-    if (this.currentZone === "garden" && this.catPosition.x > -2.65) next = "kitchen";
-    else if (this.currentZone === "kitchen" && this.catPosition.x < -3.4) next = "garden";
-    else if (this.currentZone === "kitchen" && this.catPosition.x > 7.35) next = "dining";
-    else if (this.currentZone === "dining" && this.catPosition.x < 6.65) next = "kitchen";
+    const next = selectCameraZone(this.currentZone, this.catPosition.x) as ZoneId;
 
     if (next !== this.currentZone) {
       this.previousZone = this.currentZone;
@@ -381,7 +429,7 @@ export class CatSchemerGame {
     this.desiredCameraPosition.x += offsetX * zone.follow * 0.65;
     this.desiredCameraPosition.z += offsetZ * zone.follow * 0.42;
 
-    const cameraRate = this.previousZone === this.currentZone ? 4.8 : 2.7;
+    const cameraRate = this.settings.reducedMotion ? 7 : this.previousZone === this.currentZone ? 4.8 : 2.7;
     this.camera.position.lerp(this.desiredCameraPosition, 1 - Math.exp(-cameraRate * dt));
     this.currentCameraTarget.lerp(this.desiredCameraTarget, 1 - Math.exp(-5.2 * dt));
     this.camera.lookAt(this.currentCameraTarget);
@@ -408,10 +456,10 @@ export class CatSchemerGame {
     }
 
     const mouth = this.cat.getObjectByName("mouth-anchor");
-    if (mouth && this.carryingKey) {
-      mouth.getWorldPosition(this.keyMesh.position);
-      this.keyMesh.position.y -= 0.05;
-      this.keyMesh.rotation.set(Math.PI / 2, this.facingAngle, 0);
+    if (mouth && this.carryingItem) {
+      mouth.getWorldPosition(this.carryingItem.mesh.position);
+      this.carryingItem.mesh.position.y -= 0.05;
+      this.carryingItem.mesh.rotation.set(Math.PI / 2, this.facingAngle, 0);
     }
 
     this.promptElement.textContent = this.getPrompt();
@@ -425,24 +473,43 @@ export class CatSchemerGame {
 
   private getPrompt(): string {
     if (!this.started || this.completed) return "";
-    if (this.canActInnocent()) return "E / PAW — curl up and look innocent";
-    if (this.canTakeKey()) return "E / PAW — steal the brass key";
+    const action = this.inputMethod === "gamepad" ? "A" : "E";
+    if (this.canActInnocent()) return `${action} — curl up and look innocent`;
+    if (this.carryingItem) return `${action} — drop ${this.carryingItem.label}`;
+    const item = this.nearestCarryItem();
+    if (item) return `${action} — carry ${item.label}`;
+    if (this.catPosition.distanceTo(new THREE.Vector3(4.7, 0, -4.2)) < 1.5 && !this.sinkRunning) return `${action} — turn on the sink`;
+    if (this.catPosition.distanceTo(new THREE.Vector3(1.2, 0, -4.4)) < 1.5 && !this.preparations.has("flour")) return `${action} — puncture the flour bag`;
+    if (this.catPosition.distanceTo(new THREE.Vector3(6.1, 0, -3.5)) < 1.5 && !this.preparations.has("cupboard")) return `${action} — open the cupboard`;
     const prop = this.findNearestProp(1.65);
     if (prop) return "E / PAW — swipe " + (prop.id === "red-mug" ? "the red mug" : "this object");
     return "";
   }
 
-  private tryKeyInteraction(): boolean {
-    if (!this.canTakeKey()) return false;
-    this.carryingKey = true;
-    this.keyMesh.visible = true;
-    this.completeObjective("key", "Evidence acquired. Do not look suspicious.");
-    return true;
+  private trySpecialInteraction(): boolean {
+    if (this.catPosition.distanceTo(new THREE.Vector3(4.7, 0, -4.2)) < 1.5 && !this.sinkRunning) { this.sinkRunning = true; this.markPreparation("sink", "The sink burbles ominously."); return true; }
+    if (this.catPosition.distanceTo(new THREE.Vector3(1.2, 0, -4.4)) < 1.5 && !this.preparations.has("flour")) { this.markPreparation("flour", "A white flour cloud settles across the floor."); return true; }
+    if (this.catPosition.distanceTo(new THREE.Vector3(6.1, 0, -3.5)) < 1.5 && !this.preparations.has("cupboard")) { this.markPreparation("cupboard", "The cupboard hangs suspiciously open."); return true; }
+    return false;
   }
 
-  private canTakeKey(): boolean {
-    if (this.carryingKey || this.objectives[3]?.complete) return false;
-    return this.catPosition.distanceTo(new THREE.Vector3(5.3, 0, -5.05)) < 1.35;
+  private nearestCarryItem(): CarryItem | null {
+    return this.carryItems.find((item) => item !== this.carryingItem && item.mesh.visible && item.mesh.position.distanceTo(this.cat.position) < 1.35) ?? null;
+  }
+
+  private tryCarryInteraction(): boolean {
+    if (this.carryingItem) {
+      const item = this.carryingItem;
+      this.carryingItem = null;
+      item.mesh.position.copy(this.cat.position).add(new THREE.Vector3(Math.sin(this.facingAngle), .25, Math.cos(this.facingAngle)));
+      if (item.id === "sock" && this.sinkRunning && item.mesh.position.distanceTo(new THREE.Vector3(4.7, .25, -4.2)) < 2) this.completeObjective("sock-sink", "Sock soup. A challenging new recipe.");
+      return true;
+    }
+    const item = this.nearestCarryItem();
+    if (!item) return false;
+    this.carryingItem = item;
+    if (item.id === "key") this.completeObjective("key", "Key acquired. The guarded counter was no match.");
+    return true;
   }
 
   private tryActInnocent(): boolean {
@@ -456,8 +523,8 @@ export class CatSchemerGame {
   }
 
   private canActInnocent(): boolean {
-    return this.carryingKey
-      && this.objectives.slice(0, 4).every((objective) => objective.complete)
+    return this.catastrophe
+      && this.objectives.filter((objective) => !objective.optional && objective.id !== "innocent").every((objective) => objective.complete)
       && this.catPosition.distanceTo(this.boxPosition) < 1.6;
   }
 
@@ -528,17 +595,15 @@ export class CatSchemerGame {
 
   private catchCat(): void {
     this.caughtCooldown = 3;
+    this.caughtCount += 1;
     this.catPosition.copy(this.boxPosition).add(new THREE.Vector3(0, 0, -1.2));
     this.catVelocity.set(0, 0, 0);
     this.cat.position.set(this.catPosition.x, 0, this.catPosition.z);
     this.ownerState = "returning";
     this.ownerWait = 0;
-    if (this.carryingKey) {
-      this.carryingKey = false;
-      this.keyMesh.position.set(5.3, 1.5, -5.05);
-      const objective = this.objectives.find((item) => item.id === "key");
-      if (objective) objective.complete = false;
-      this.renderObjectives();
+    if (this.carryingItem) {
+      this.carryingItem.mesh.position.copy(this.carryingItem.home);
+      this.carryingItem = null;
     }
     this.showToast("Caught! Deposited outside with great dignity.");
   }
@@ -611,14 +676,17 @@ export class CatSchemerGame {
   }
 
   private renderObjectives(): void {
-    const nextIndex = this.objectives.findIndex((objective) => !objective.complete);
+    const main = this.objectives.filter((objective) => !objective.optional);
+    const optional = this.objectives.filter((objective) => objective.optional);
+    const nextIndex = main.findIndex((objective) => !objective.complete);
     this.objectiveElement.innerHTML = `
       <h2>MORNING AGENDA</h2>
-      ${this.objectives.map((objective, index) => `
+      ${main.map((objective, index) => `
         <div class="objective ${objective.complete ? "complete" : ""} ${index === nextIndex ? "current" : ""}">
           <span class="box"></span><span>${objective.text}</span>
         </div>
       `).join("")}
+      <details><summary>OPTIONAL MISCHIEF</summary>${optional.map((objective) => `<div class="objective ${objective.complete ? "complete" : ""}"><span class="box"></span><span>${objective.text}</span></div>`).join("")}</details>
     `;
   }
 
@@ -705,6 +773,15 @@ export class CatSchemerGame {
     this.keyMesh.position.set(5.3, 1.51, -5.05);
     this.keyMesh.visible = true;
     this.scene.add(this.keyMesh);
+    this.carryItems.push({ id: "key", label: "brass key", mesh: this.keyMesh, home: this.keyMesh.position.clone() });
+    this.addCarryItem("sock", "striped sock", new THREE.Vector3(8.2, .22, -5.6), 0x8c5f87);
+    this.addCarryItem("sponge", "sponge", new THREE.Vector3(5.8, .25, -4.15), 0xe5c449);
+    this.addCarryItem("snack", "breakfast sausage", new THREE.Vector3(10.8, 1.42, 1.8), 0x9e5038);
+    this.addCarryItem("toy", "mouse toy", new THREE.Vector3(-8.1, .22, -1.9), 0x738b91);
+
+    this.addMarker(new THREE.Vector3(4.7, .08, -4.2), 0x68a9bd);
+    this.addMarker(new THREE.Vector3(1.2, .08, -4.4), 0xeee1bd);
+    this.addMarker(new THREE.Vector3(6.1, .08, -3.5), 0xc9875e);
 
     this.addDoorFrame(-3, 0);
     this.addDoorFrame(7, -1.1);
@@ -890,6 +967,24 @@ export class CatSchemerGame {
     this.props.push({ id, mesh: group, velocity: new THREE.Vector3(), radius, disturbed: false, settled: false, crashPlayed: false });
   }
 
+  private addCarryItem(id: string, label: string, position: THREE.Vector3, color: number): void {
+    const mesh = new THREE.Mesh(new THREE.CapsuleGeometry(.11, .35, 4, 8), new THREE.MeshStandardMaterial({ color, roughness: .85 }));
+    mesh.position.copy(position); mesh.rotation.z = Math.PI / 2; mesh.castShadow = true; this.scene.add(mesh);
+    this.carryItems.push({ id, label, mesh, home: position.clone() });
+  }
+
+  private addMarker(position: THREE.Vector3, color: number): void {
+    const marker = new THREE.Mesh(new THREE.RingGeometry(.45, .57, 24), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .48, side: THREE.DoubleSide }));
+    marker.position.copy(position); marker.rotation.x = -Math.PI / 2; this.scene.add(marker);
+  }
+
+  private updateDebug(frameDelta: number): void {
+    if (!this.debugVisible) return;
+    const panel = document.querySelector<HTMLElement>("#debug-panel");
+    if (!panel) return;
+    panel.textContent = `FPS ${Math.round(1 / Math.max(frameDelta, .001))}\nDraw calls ${this.renderer.info.render.calls}\nTriangles ${this.renderer.info.render.triangles}\nPlayer ${this.catPosition.x.toFixed(2)}, ${this.catPosition.z.toFixed(2)}\nState ${this.carryingItem ? `carrying ${this.carryingItem.id}` : "free"}\nNPC ${this.ownerState}\nCamera ${this.currentZone}\nPreparations ${this.preparations.size}/2\nCatastrophe ${this.catastrophe ? "ready" : "pending"}`;
+  }
+
   private createKey(): THREE.Group {
     const group = new THREE.Group();
     const material = new THREE.MeshStandardMaterial({ color: 0xd7ae48, metalness: 0.45, roughness: 0.38 });
@@ -911,7 +1006,7 @@ export class CatSchemerGame {
     const height = window.innerHeight;
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
-    const pixelRatio = Math.min(window.devicePixelRatio, width < 900 ? 1.35 : 1.8);
+    const pixelRatio = this.settings.graphics === "low" ? 1 : Math.min(window.devicePixelRatio, 1.8);
     this.renderer.setPixelRatio(pixelRatio);
     this.renderer.setSize(width, height, false);
   }

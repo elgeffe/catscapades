@@ -20,7 +20,6 @@ body,
   margin: 0;
   overflow: hidden;
   overscroll-behavior: none;
-  touch-action: none;
   user-select: none;
 }
 
@@ -76,6 +75,8 @@ kbd { font: inherit; }
   font-size: 12px;
   letter-spacing: .12em;
 }
+.objectives details { margin-top: 10px; border-top: 1px solid rgba(47,43,37,.25); padding-top: 8px; }
+.objectives summary { cursor: pointer; font-size: 10px; font-weight: 900; letter-spacing: .08em; }
 
 .objective {
   display: grid;
@@ -178,7 +179,10 @@ kbd {
   text-align: center;
 }
 
-.touch-controls { display: none; }
+.subtitle { position: absolute; left: 50%; bottom: 132px; transform: translateX(-50%); color: #fff8dc; background: rgba(47,43,37,.86); border-radius: 5px; padding: 7px 12px; font-weight: 800; opacity: 0; }
+.debug-panel { display: none; position: absolute; left: 18px; top: 112px; margin: 0; padding: 10px; color: #dfffd9; background: rgba(15,24,15,.88); border: 1px solid #86b67e; font: 12px/1.45 monospace; pointer-events: none; }
+.debug-panel.visible { display: block; }
+.high-contrast .prompt { color: #fff; background: #000; outline: 3px solid #fff; }
 
 .modal {
   position: absolute;
@@ -222,82 +226,8 @@ kbd {
 }
 .modal-panel button:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 var(--ink); }
 .success-panel { background: #e6f0cf; }
-
-.rotate-hint {
-  display: none;
-  position: absolute;
-  inset: 0;
-  z-index: 20;
-  place-content: center;
-  gap: 10px;
-  padding: 24px;
-  background: #fff4d4;
-  text-align: center;
-}
-.rotate-icon { font-size: 52px; }
-
-@media (pointer: coarse), (max-width: 900px) {
-  .desktop-help { display: none; }
-  .title-card p { display: none; }
-  .objectives { top: auto; bottom: max(12px, env(safe-area-inset-bottom)); right: 50%; transform: translateX(50%); width: min(52vw, 330px); padding: 9px 12px; box-shadow: 3px 3px 0 var(--shadow); }
-  .objectives h2 { margin-bottom: 5px; }
-  .objective { display: none; margin: 2px 0; font-size: 10px; }
-  .objective.current, .objective.complete:last-of-type { display: grid; }
-  .objective .box { width: 13px; height: 13px; }
-  .prompt { bottom: 104px; }
-  .touch-controls {
-    position: absolute;
-    inset: 0;
-    display: block;
-    pointer-events: none;
-  }
-  .joystick {
-    position: absolute;
-    left: max(24px, env(safe-area-inset-left));
-    bottom: max(28px, env(safe-area-inset-bottom));
-    width: 118px;
-    height: 118px;
-    border: 2px solid rgba(47,43,37,.4);
-    border-radius: 50%;
-    background: rgba(255,249,230,.25);
-    pointer-events: auto;
-  }
-  .joystick-knob {
-    position: absolute;
-    left: 50%; top: 50%;
-    width: 54px; height: 54px;
-    border: 2px solid rgba(47,43,37,.75);
-    border-radius: 50%;
-    background: rgba(255,249,230,.82);
-    transform: translate(-50%, -50%);
-    box-shadow: 3px 3px 0 rgba(47,43,37,.18);
-  }
-  .action-cluster {
-    position: absolute;
-    right: max(20px, env(safe-area-inset-right));
-    bottom: max(24px, env(safe-area-inset-bottom));
-    width: 172px;
-    height: 134px;
-    pointer-events: none;
-  }
-  .round-button {
-    position: absolute;
-    appearance: none;
-    border: 2px solid rgba(47,43,37,.86);
-    border-radius: 50%;
-    background: rgba(255,249,230,.82);
-    color: var(--ink);
-    font-size: 9px;
-    font-weight: 900;
-    box-shadow: 3px 3px 0 rgba(47,43,37,.2);
-    pointer-events: auto;
-  }
-  .round-button:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 rgba(47,43,37,.2); }
-  .round-button.primary { right: 0; bottom: 0; width: 76px; height: 76px; background: rgba(214,83,60,.92); color: white; }
-  #btn-meow { left: 22px; bottom: 0; width: 58px; height: 58px; }
-  #btn-pounce { right: 48px; top: 0; width: 61px; height: 61px; }
-}
-
-@media (orientation: portrait) and (pointer: coarse) {
-  .rotate-hint { display: grid; }
-}
+.settings-panel { text-align: left; width: min(500px, 92vw); }
+.settings-panel h2 { text-align: center; }
+.settings-panel label { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin: 14px 0; font-weight: 800; }
+.settings-panel input[type="range"] { width: 210px; }
+.button-row { display: flex; justify-content: center; gap: 18px; margin-top: 26px; }
