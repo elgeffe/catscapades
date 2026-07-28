@@ -3,6 +3,7 @@ import type { InputFrame } from "./input";
 import { TinyAudio } from "./audio";
 import type { GameSettings } from "./settings";
 import { selectCameraZone } from "./core/gameplay";
+import { OBJECTIVE_DEFINITIONS, OPTIONAL_OBJECTIVE_DEFINITIONS } from "./core/level-model";
 
 type ZoneId = "garden" | "kitchen" | "dining";
 type OwnerState = "routine" | "investigating" | "returning";
@@ -55,7 +56,7 @@ const UP = new THREE.Vector3(0, 1, 0);
 const FIXED_STEP = 1 / 60;
 const CAT_RADIUS = 0.48;
 
-export class CatSchemerGame {
+export class CatscapadesGame {
   readonly scene = new THREE.Scene();
   readonly camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
 
@@ -86,18 +87,13 @@ export class CatSchemerGame {
   private readonly supports: SupportSurface[] = [];
   private readonly props: DynamicProp[] = [];
   private readonly carryItems: CarryItem[] = [];
+  private sinkWater!: THREE.Mesh;
+  private flourBag!: THREE.Mesh;
+  private cupboardDoor!: THREE.Mesh;
   private readonly zones: Record<ZoneId, CameraZone>;
   private readonly objectives: Objective[] = [
-    { id: "enter", text: "Get inside", complete: false },
-    { id: "distract", text: "Create a distraction", complete: false },
-    { id: "key", text: "Steal the brass key", complete: false },
-    { id: "prepare", text: "Prepare two disasters (0/2)", complete: false },
-    { id: "catastrophe", text: "Trigger the breakfast catastrophe", complete: false },
-    { id: "innocent", text: "Return to the box and pretend to sleep", complete: false },
-    { id: "sock-sink", text: "Secret: put the sock in the sink", complete: false, optional: true },
-    { id: "fruit", text: "Secret: sit in the fruit bowl", complete: false, optional: true },
-    { id: "key-box", text: "Secret: bring the key to the box", complete: false, optional: true },
-    { id: "uncaught", text: "Secret: finish without being caught", complete: false, optional: true },
+    ...OBJECTIVE_DEFINITIONS.map((objective) => ({ ...objective, complete: false })),
+    ...OPTIONAL_OBJECTIVE_DEFINITIONS.map((objective) => ({ ...objective, complete: false, optional: true })),
   ];
 
   private currentZone: ZoneId = "garden";
@@ -116,6 +112,7 @@ export class CatSchemerGame {
   private readonly preparations = new Set<string>();
   private displayedPreparationCount = -1;
   private sinkRunning = false;
+  private counterAccess = false;
   private catastrophe = false;
   private caughtCount = 0;
   private paused = false;
@@ -259,6 +256,10 @@ export class CatSchemerGame {
       this.pounceCooldown = 0.72;
       const forward = new THREE.Vector3(Math.sin(this.facingAngle), 0, Math.cos(this.facingAngle));
       this.catVelocity.addScaledVector(forward, 4.6);
+      if (this.planarDistance(this.catPosition, new THREE.Vector3(5.3, 0, -4.15)) < 1.65) {
+        this.counterAccess = true;
+        this.showToast("A neat leap puts the key within whisker range.");
+      }
     }
 
     if (input.actionPressed && this.swipeTimer <= 0) {
@@ -478,24 +479,28 @@ export class CatSchemerGame {
     if (this.carryingItem) return `${action} — drop ${this.carryingItem.label}`;
     const item = this.nearestCarryItem();
     if (item) return `${action} — carry ${item.label}`;
-    if (this.catPosition.distanceTo(new THREE.Vector3(4.7, 0, -4.2)) < 1.5 && !this.sinkRunning) return `${action} — turn on the sink`;
-    if (this.catPosition.distanceTo(new THREE.Vector3(1.2, 0, -4.4)) < 1.5 && !this.preparations.has("flour")) return `${action} — puncture the flour bag`;
-    if (this.catPosition.distanceTo(new THREE.Vector3(6.1, 0, -3.5)) < 1.5 && !this.preparations.has("cupboard")) return `${action} — open the cupboard`;
+    if (!this.counterAccess && this.planarDistance(this.catPosition, new THREE.Vector3(5.3, 0, -4.15)) < 1.65) return `${this.inputMethod === "gamepad" ? "B" : "SPACE"} — leap up for the key`;
+    if (this.planarDistance(this.catPosition, new THREE.Vector3(4.7, 0, -4.2)) < 1.5 && !this.sinkRunning) return `${action} — turn on the sink`;
+    if (this.planarDistance(this.catPosition, new THREE.Vector3(1.2, 0, -4.4)) < 1.5 && !this.preparations.has("flour")) return `${action} — puncture the flour bag`;
+    if (this.planarDistance(this.catPosition, new THREE.Vector3(6.1, 0, -3.5)) < 1.5 && !this.preparations.has("cupboard")) return `${action} — open the cupboard`;
     const prop = this.findNearestProp(1.65);
     if (prop) return "E / PAW — swipe " + (prop.id === "red-mug" ? "the red mug" : "this object");
     return "";
   }
 
   private trySpecialInteraction(): boolean {
-    if (this.catPosition.distanceTo(new THREE.Vector3(4.7, 0, -4.2)) < 1.5 && !this.sinkRunning) { this.sinkRunning = true; this.markPreparation("sink", "The sink burbles ominously."); return true; }
-    if (this.catPosition.distanceTo(new THREE.Vector3(1.2, 0, -4.4)) < 1.5 && !this.preparations.has("flour")) { this.markPreparation("flour", "A white flour cloud settles across the floor."); return true; }
-    if (this.catPosition.distanceTo(new THREE.Vector3(6.1, 0, -3.5)) < 1.5 && !this.preparations.has("cupboard")) { this.markPreparation("cupboard", "The cupboard hangs suspiciously open."); return true; }
+    if (this.planarDistance(this.catPosition, new THREE.Vector3(4.7, 0, -4.2)) < 1.5 && !this.sinkRunning) { this.sinkRunning = true; this.sinkWater.visible = true; this.markPreparation("sink", "The sink burbles ominously."); return true; }
+    if (this.planarDistance(this.catPosition, new THREE.Vector3(1.2, 0, -4.4)) < 1.5 && !this.preparations.has("flour")) { this.flourBag.rotation.z = .7; this.flourBag.scale.y = .55; this.markPreparation("flour", "A white flour cloud settles across the floor."); return true; }
+    if (this.planarDistance(this.catPosition, new THREE.Vector3(6.1, 0, -3.5)) < 1.5 && !this.preparations.has("cupboard")) { this.cupboardDoor.rotation.y = -1.2; this.markPreparation("cupboard", "The cupboard hangs suspiciously open."); return true; }
     return false;
   }
 
   private nearestCarryItem(): CarryItem | null {
-    return this.carryItems.find((item) => item !== this.carryingItem && item.mesh.visible && item.mesh.position.distanceTo(this.cat.position) < 1.35) ?? null;
+    return this.carryItems.find((item) => item !== this.carryingItem && item.mesh.visible
+      && (item.id !== "key" || this.counterAccess) && this.planarDistance(item.mesh.position, this.cat.position) < 1.35) ?? null;
   }
+
+  private planarDistance(a: THREE.Vector3, b: THREE.Vector3): number { return Math.hypot(a.x - b.x, a.z - b.z); }
 
   private tryCarryInteraction(): boolean {
     if (this.carryingItem) {
@@ -779,9 +784,7 @@ export class CatSchemerGame {
     this.addCarryItem("snack", "breakfast sausage", new THREE.Vector3(10.8, 1.42, 1.8), 0x9e5038);
     this.addCarryItem("toy", "mouse toy", new THREE.Vector3(-8.1, .22, -1.9), 0x738b91);
 
-    this.addMarker(new THREE.Vector3(4.7, .08, -4.2), 0x68a9bd);
-    this.addMarker(new THREE.Vector3(1.2, .08, -4.4), 0xeee1bd);
-    this.addMarker(new THREE.Vector3(6.1, .08, -3.5), 0xc9875e);
+    this.addDisasterProps();
 
     this.addDoorFrame(-3, 0);
     this.addDoorFrame(7, -1.1);
@@ -973,9 +976,13 @@ export class CatSchemerGame {
     this.carryItems.push({ id, label, mesh, home: position.clone() });
   }
 
-  private addMarker(position: THREE.Vector3, color: number): void {
-    const marker = new THREE.Mesh(new THREE.RingGeometry(.45, .57, 24), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .48, side: THREE.DoubleSide }));
-    marker.position.copy(position); marker.rotation.x = -Math.PI / 2; this.scene.add(marker);
+  private addDisasterProps(): void {
+    this.sinkWater = new THREE.Mesh(new THREE.BoxGeometry(1.35, .04, .72), new THREE.MeshStandardMaterial({ color: 0x58a9c5, emissive: 0x17495a, roughness: .25 }));
+    this.sinkWater.position.set(4.7, 1.38, -5.3); this.sinkWater.visible = false; this.scene.add(this.sinkWater);
+    this.flourBag = new THREE.Mesh(new THREE.BoxGeometry(.6, .82, .38), new THREE.MeshStandardMaterial({ color: 0xf5edda, roughness: 1 }));
+    this.flourBag.position.set(1.2, .42, -4.4); this.flourBag.rotation.y = .18; this.flourBag.castShadow = true; this.scene.add(this.flourBag);
+    this.cupboardDoor = new THREE.Mesh(new THREE.BoxGeometry(.08, 1.15, 1.1), new THREE.MeshStandardMaterial({ color: 0xa36f47, roughness: .9 }));
+    this.cupboardDoor.position.set(6.1, .8, -3.65); this.cupboardDoor.geometry.translate(0, 0, -.55); this.cupboardDoor.castShadow = true; this.scene.add(this.cupboardDoor);
   }
 
   private updateDebug(frameDelta: number): void {

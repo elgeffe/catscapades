@@ -1,10 +1,10 @@
-# Cat Schemer MVP Implementation Plan
+# Catscapades MVP Implementation Plan
 
 ## Purpose and scope
 
-This document records the implementation plan for turning the existing Cat Schemer prototype into a polished, replayable browser MVP. The first level is **A Perfectly Quiet Morning**, a 10–20 minute third-person stealth-comedy scenario in which a calculating house cat observes a homeowner, engineers a multi-stage domestic catastrophe, and returns to an innocent pose.
+This document records the implementation plan for turning the existing Catscapades prototype into a polished, replayable browser MVP. The first level is **A Perfectly Quiet Morning**, a 10–20 minute third-person stealth-comedy scenario in which a calculating house cat observes a homeowner, engineers a multi-stage domestic catastrophe, and returns to an innocent pose.
 
-The product is **desktop only**. Mobile, touch controls, responsive mobile layouts, and mobile performance are explicitly out of scope. Any mobile requirements in the original brief—including the touch reference in its definition of done—are ignored. Supported play methods are desktop keyboard and standard gamepads in a desktop browser.
+The product supports keyboard and standard gamepads in a desktop browser.
 
 The project will evolve incrementally rather than being rewritten. Genre, pacing, and authored-camera principles may be inspirational, but all characters, environments, objectives, dialogue, assets, UI, music, animations, and layouts must be original.
 
@@ -41,7 +41,7 @@ The project will evolve incrementally rather than being rewritten. Genre, pacing
 3. **Hardcoded objective sequence.** Objectives are advanced through direct checks instead of an event-driven, data-defined condition system. Out-of-order and alternative solutions will be brittle without extraction.
 4. **Limited interaction model.** Contextual behavior is implemented as object-specific branches and does not yet expose reusable verbs, options, scoring, placement, or state machines.
 5. **Shallow NPC model.** The current state set is much smaller than the required perception, evidence, suspicion, pursuit, catching, relocation, restoration, and routine-resumption loop. Props can influence behavior too directly.
-6. **Prototype input scope.** Keyboard and touch exist, but gamepad, active-device prompt switching, centralized remappable bindings, stalk, carrying controls, pause, and accessibility preferences are absent. Touch code is legacy for this desktop-only MVP and should be removed after desktop parity is secured.
+6. **Prototype input scope.** Gamepad, active-device prompt switching, centralized remappable bindings, stalk, carrying controls, pause, and accessibility preferences need dedicated system ownership.
 7. **Incomplete game loop lifecycle.** A fixed accumulator exists, but the loop needs capped catch-up, explicit update phases, visibility pause/recovery, and interpolation boundaries.
 8. **Camera system gaps.** Zones lack authored pitch/FOV/focus data, optional rails, foreground fading, controller peek, critical-transition locks, and comprehensive visualization.
 9. **No automated logic tests or lint script.** High-risk gameplay rules cannot currently be regression tested independently from Three.js.
@@ -131,7 +131,6 @@ At least 12 props use the reusable interaction architecture. At least five item 
 - Preserve a stable, blended movement basis during major camera transitions.
 - Keyboard: WASD/arrows move, Shift scamper, E primary/contextual action, Q meow, Space contextual jump, Escape pause, and backquote debug in development.
 - Gamepad: left stick move, face buttons for action/meow/jump, shoulder or stick control for stalk/scamper and limited peek, and Start/Menu pause. Exact bindings live in centralized configuration and prompts reflect the last active device.
-- There is no touch-control acceptance work. Remove prototype touch UI/input once desktop and gamepad paths are verified.
 
 ### Contextual jump
 
@@ -253,7 +252,6 @@ Every milestone ends with a runnable project, typecheck, production build, test 
 - Polish movement; add stalk and carrying speed rules.
 - Implement interaction types, option scoring, prompts, and object state adapters.
 - Implement authored contextual jumps, carry/drop/place, hiding, and innocence actions.
-- Remove legacy touch controls after desktop parity verification.
 - Add tests for input mapping, scoring, carried state, and catch/drop/reset.
 
 **Exit:** the cat can traverse, manipulate, carry/place five item types, hide, and recover from a catch with both desktop input methods.  
@@ -348,7 +346,7 @@ Do not unit-test Three.js rendering without a specific benefit. Before each mile
 ## Desktop MVP definition of done
 
 - A new player can finish **A Perfectly Quiet Morning** without developer guidance in approximately 10–20 minutes.
-- Movement is responsive and predictable on keyboard and gamepad; no touch/mobile acceptance criterion applies.
+- Movement is responsive and predictable on keyboard and gamepad.
 - Semi-fixed cameras clearly frame all playable areas and transitions do not unexpectedly alter movement.
 - At least 12 props use reusable interaction logic, with at least five carryable item types.
 - The homeowner completes a routine and can perceive, investigate, become suspicious, pursue, catch, relocate, restore, and resume without omniscient blame.
@@ -375,4 +373,3 @@ Do not unit-test Three.js rendering without a specific benefit. Before each mile
 2. Replace the highest-impact procedural animations and temporary sounds through the existing adapters.
 3. Add performance budgets and browser/device coverage based on deployment analytics.
 4. Improve authoring tools for camera zones, routes, jumps, and interaction placement if a second level is approved.
-5. Consider broader platform support, including mobile/touch, only as a separately scoped project after the desktop MVP is stable.

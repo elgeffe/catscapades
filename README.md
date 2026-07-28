@@ -1,4 +1,4 @@
-# Cat Schemer — A Perfectly Quiet Morning
+# Catscapades — A Perfectly Quiet Morning
 
 A desktop browser stealth-comedy MVP about an extremely innocent cat. Observe a morning routine, create distractions, steal and carry evidence, prepare a domestic catastrophe, and make it back to the garden box before the homeowner catches you.
 
@@ -47,7 +47,23 @@ The built static site is written to `dist/`.
 | Escape | Pause/settings |
 | Backquote | Developer diagnostics |
 
-Gamepads use the left stick to move, A to interact, B to leap, X to meow, LB to stalk, RB to scamper, and Menu to pause. Prompts automatically switch to the active device. Mobile and touch play are intentionally unsupported.
+Gamepads use the left stick to move, A to interact, B to leap, X to meow, LB to stalk, RB to scamper, and Menu to pause. Prompts automatically switch to the active device.
+
+## Programmatic playtesting
+
+The level has a rendering-independent, event-driven model. It exposes valid commands for the current state, rejects impossible actions, and emits events for movement, stimuli, items, preparations, objectives, and completion. Run the canonical playthrough without a browser:
+
+```bash
+npm run playtest
+```
+
+The same model is exercised by tests for the critical path, the key's counter-jump prerequisite, alternate preparation order, and action availability. This makes objective deadlocks and unclear prerequisites reproducible before tuning the Three.js presentation.
+
+Agentic development instructions live in `.agents/skills/catscapades-playtest`. An agent can invoke the bundled validation workflow directly:
+
+```bash
+.agents/skills/catscapades-playtest/scripts/run-playtest.sh
+```
 
 ## Architecture
 

@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import "./styles.css";
 import { InputController } from "./input";
-import { CatSchemerGame } from "./game";
+import { CatscapadesGame } from "./game";
 import { loadSettings, saveSettings, type GameSettings } from "./settings";
 
 const canvas = requireElement<HTMLCanvasElement>("#game");
@@ -14,7 +14,7 @@ renderer.toneMappingExposure = 1.05;
 
 let settings = loadSettings();
 const input = new InputController((method) => document.body.dataset.input = method);
-const game = new CatSchemerGame(
+const game = new CatscapadesGame(
   renderer,
   requireElement("#objectives"),
   requireElement("#prompt"),

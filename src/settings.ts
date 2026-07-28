@@ -6,7 +6,7 @@ export interface GameSettings {
   highContrast: boolean;
 }
 
-const KEY = "cat-schemer-settings-v1";
+const KEY = "catscapades-settings-v1";
 export const DEFAULT_SETTINGS: GameSettings = {
   masterVolume: 0.8, effectsVolume: 0.8, graphics: "high", reducedMotion: false, highContrast: false,
 };
