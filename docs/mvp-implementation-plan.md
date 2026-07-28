@@ -70,7 +70,23 @@ Cross-system behavior will flow through typed events and queries. Props emit sta
 
 ### Physics decision
 
-Retain the hand-rolled collision system initially. The MVP uses a kinematic cat, authored jumps, static room geometry, triggers, and a limited number of scripted props, so Rapier would add integration and tuning cost without a demonstrated benefit. Reconsider Rapier only if testing proves that stable moving furniture, stacking, or shape casts cannot be delivered reliably. If introduced, record the benchmark/problem it solves, retain custom kinematic locomotion, use a fixed timestep and simple colliders, cap active bodies, synchronize transforms in one place, and add collision visualization.
+**Superseded 2026-07-28: Rapier has been adopted.** The original decision was to retain the hand-rolled collision system and reconsider Rapier only if testing proved a limitation. Testing proved one.
+
+The problem it solves: the level's traversal design depends on the cat climbing onto counters, chairs, boxes, tables, and a wall shelf. The hand-rolled solver was a set of 2D rectangles with no vertical axis and therefore no notion of "on top of", so jumping onto anything could only ever be approximated with proximity flags — which is exactly how it behaved. Rapier's kinematic character controller supplies grounded checks, auto-step, ground snapping, and slide-along-wall directly, and dynamic rigid bodies give swiped crockery believable behaviour without per-object code.
+
+The conditions recorded for adoption have been met:
+
+- custom kinematic locomotion is retained in `src/cat/cat-controller.ts`; Rapier resolves movement, it does not author feel;
+- the world runs on the same fixed timestep as gameplay;
+- colliders are simple boxes and capsules, emitted by the same builders that emit the visuals;
+- only props are dynamic; they are capped in number and allowed to sleep;
+- transforms are synchronised in one place, in `CatscapadesGame.updateWorldState`;
+- collider visualisation is available from the development diagnostics overlay.
+
+Two implementation notes worth preserving, both of which cost real debugging time:
+
+1. A kinematic body's translation does not change until `world.step()` runs. Reconciling velocity against a position delta therefore lags a frame and cancels a jump on the frame it starts. Reconcile against the controller's computed movement instead.
+2. Ground snapping must be disabled during a jump's ascent, or it cancels it.
 
 ### Data and persistence
 
@@ -361,7 +377,7 @@ Do not unit-test Three.js rendering without a specific benefit. Before each mile
 ## Known risks and fallback decisions
 
 - **Large-class extraction risk:** behavior regressions. Preferred solution: extract one seam at a time behind existing method contracts. Fallback: leave rendering/world construction in a facade longer while extracting pure gameplay rules first.
-- **Hand-rolled collision limits:** authored jumps or moving props may expose query gaps. Preferred solution: add narrow swept/query support. Fallback: constrain those interactions to authored arcs and scripted prop transitions; adopt Rapier only with measured need.
+- **Physics integration cost (resolved):** Rapier was adopted after the hand-rolled solver proved unable to express vertical traversal. Contextual leaps use authored arcs to known landing points rather than ballistics, because a ballistic arc must clear the lip of a surface using horizontal speed the cat does not have when taking off pressed against the furniture face.
 - **NPC navigation complexity:** dense furniture may cause route snagging. Preferred solution: authored route graph with local avoidance. Fallback: use explicit recovery nodes/short warps outside the camera rather than a full navmesh stack.
 - **Catastrophe combinatorics:** many preparation combinations can multiply staging work. Preferred solution: define a supported compatibility matrix and normalize it into a few polished payoff variants. Fallback: require any two preparations but funnel them into one clearly motivated master trigger.
 - **Asset scope:** polished bespoke animation/audio may exceed MVP capacity. Preferred solution: consistent procedural low-poly presentation behind replaceable adapters. Fallback: reduce the number of unique clips/cues without reducing required gameplay-state readability.

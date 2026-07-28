@@ -5,16 +5,16 @@ export type PreparationId = "sink" | "flour" | "cupboard" | "mug";
 export const OBJECTIVE_DEFINITIONS = [
   { id: "enter", text: "Get inside" },
   { id: "distract", text: "Create a distraction" },
-  { id: "key", text: "Leap onto the counter and steal the key" },
+  { id: "key", text: "Climb the worktop to the shelf and steal the key" },
   { id: "prepare", text: "Prepare two disasters (0/2)" },
   { id: "catastrophe", text: "Trigger the breakfast catastrophe" },
   { id: "innocent", text: "Return to the box and pretend to sleep" },
 ] as const;
 
 export const OPTIONAL_OBJECTIVE_DEFINITIONS = [
-  { id: "sock-sink", text: "Secret: put the sock in the sink" },
+  { id: "sock-sink", text: "Secret: drop the sock in the running sink" },
   { id: "fruit", text: "Secret: sit in the fruit bowl" },
-  { id: "key-box", text: "Secret: bring the key to the box" },
+  { id: "key-box", text: "Secret: bring the key out to your box" },
   { id: "uncaught", text: "Secret: finish without being caught" },
 ] as const;
 

@@ -2,36 +2,24 @@ import * as THREE from "three";
 import type { InputFrame } from "./input";
 import { TinyAudio } from "./audio";
 import type { GameSettings } from "./settings";
-import { selectCameraZone } from "./core/gameplay";
+import { resolveInteraction, type InteractionCandidate } from "./core/gameplay";
 import { OBJECTIVE_DEFINITIONS, OPTIONAL_OBJECTIVE_DEFINITIONS } from "./core/level-model";
+import { clamp, damp, dampAngle, smoothstep } from "./core/math";
+import { buildCat, type CatRig } from "./models/cat";
+import { buildOwner, type OwnerRig } from "./models/owner";
+import { buildMugShards, buildBook, buildFruitBowl, buildKettle, buildKey, buildMouseToy, buildMug, buildSausage, buildSock, buildSponge, type BuiltProp } from "./models/props";
+import { CatAnimator, NEUTRAL_CAT_ANIMATION, type CatAnimationInput } from "./anim/cat-animator";
+import { OwnerAnimator } from "./anim/owner-animator";
+import { PhysicsWorld, type CharacterBody, type DynamicBody } from "./physics/physics-world";
+import { buildLevel, type LevelHandles } from "./level/level-builder";
+import {
+  OWNER_ROUTINE, POINTS_OF_INTEREST, PROPS, SPAWN, STATIONS,
+  type PropSpec, type StationSpec,
+} from "./level/level-data";
+import { CameraDirector } from "./camera/camera-director";
+import { CatController, type CatFrameState } from "./cat/cat-controller";
 
-type ZoneId = "garden" | "kitchen" | "dining";
-type OwnerState = "routine" | "investigating" | "returning";
-
-interface RectCollider {
-  minX: number;
-  maxX: number;
-  minZ: number;
-  maxZ: number;
-}
-
-interface SupportSurface {
-  minX: number;
-  maxX: number;
-  minZ: number;
-  maxZ: number;
-  top: number;
-}
-
-interface CameraZone {
-  id: ZoneId;
-  label: string;
-  targetBase: THREE.Vector3;
-  cameraBase: THREE.Vector3;
-  deadX: number;
-  deadZ: number;
-  follow: number;
-}
+type OwnerState = "routine" | "investigating" | "pursuing" | "returning";
 
 interface Objective {
   id: string;
@@ -40,143 +28,150 @@ interface Objective {
   optional?: boolean;
 }
 
-interface CarryItem { id: string; label: string; mesh: THREE.Object3D; home: THREE.Vector3; }
-
-interface DynamicProp {
-  id: string;
-  mesh: THREE.Object3D;
-  velocity: THREE.Vector3;
-  radius: number;
-  disturbed: boolean;
-  settled: boolean;
-  crashPlayed: boolean;
+interface LiveProp {
+  readonly spec: PropSpec;
+  readonly object: THREE.Object3D;
+  readonly body: DynamicBody;
+  readonly restOffset: number;
+  readonly mass: number;
+  broken: boolean;
+  settledHeight: number;
 }
 
-const UP = new THREE.Vector3(0, 1, 0);
 const FIXED_STEP = 1 / 60;
-const CAT_RADIUS = 0.48;
+/**
+ * Catch-up ceiling. Eight steps lets a machine running at 10 FPS still advance
+ * the simulation at real speed; beyond that the loop deliberately slows down
+ * rather than spiralling into ever-longer frames.
+ */
+const MAX_FRAME_DELTA = FIXED_STEP * 8;
+const CATCH_DISTANCE = 1.15;
+const SWIPE_REACH = 0.95;
+const CARRY_REACH = 0.75;
 
 export class CatscapadesGame {
   readonly scene = new THREE.Scene();
-  readonly camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
+  readonly camera = new THREE.PerspectiveCamera(34, 1, 0.05, 120);
 
   private readonly audio = new TinyAudio();
-  private readonly cat = new THREE.Group();
-  private readonly catVisual = new THREE.Group();
-  private readonly catTail = new THREE.Group();
-  private readonly owner = new THREE.Group();
-  private readonly ownerAlert = new THREE.Mesh(
-    new THREE.SphereGeometry(0.16, 12, 8),
-    new THREE.MeshBasicMaterial({ color: 0xd6533c }),
-  );
-  private readonly keyMesh = this.createKey();
-  private readonly boxPosition = new THREE.Vector3(-10.8, 0, 4.7);
-  private readonly catPosition = new THREE.Vector3(-10.8, 0, 4.7);
-  private readonly catVelocity = new THREE.Vector3();
-  private readonly moveDirection = new THREE.Vector3();
-  private readonly desiredCameraPosition = new THREE.Vector3();
-  private readonly desiredCameraTarget = new THREE.Vector3();
-  private readonly currentCameraTarget = new THREE.Vector3(-8, 0, 0);
-  private readonly ownerTarget = new THREE.Vector3();
-  private readonly ownerRoutine = [
-    new THREE.Vector3(10.8, 0, 4.1),
-    new THREE.Vector3(1.7, 0, -3.55),
-    new THREE.Vector3(10.2, 0, -3.85),
-  ];
-  private readonly colliders: RectCollider[] = [];
-  private readonly supports: SupportSurface[] = [];
-  private readonly props: DynamicProp[] = [];
-  private readonly carryItems: CarryItem[] = [];
-  private sinkWater!: THREE.Mesh;
-  private flourBag!: THREE.Mesh;
-  private cupboardDoor!: THREE.Mesh;
-  private readonly zones: Record<ZoneId, CameraZone>;
+  private readonly cat: CatRig;
+  private readonly catAnimator: CatAnimator;
+  private readonly controller: CatController;
+  private readonly owner: OwnerRig;
+  private readonly ownerAnimator: OwnerAnimator;
+  private readonly ownerBody: CharacterBody;
+  private readonly director: CameraDirector;
+  private readonly level: LevelHandles;
+
+  private readonly props: LiveProp[] = [];
   private readonly objectives: Objective[] = [
     ...OBJECTIVE_DEFINITIONS.map((objective) => ({ ...objective, complete: false })),
     ...OPTIONAL_OBJECTIVE_DEFINITIONS.map((objective) => ({ ...objective, complete: false, optional: true })),
   ];
-
-  private currentZone: ZoneId = "garden";
-  private previousZone: ZoneId = "garden";
-  private ownerState: OwnerState = "routine";
-  private ownerRoutineIndex = 0;
-  private ownerWait = 0;
-  private zoneLabelTimer = 0;
-  private toastTimer = 0;
-  private pounceTimer = 0;
-  private pounceCooldown = 0;
-  private swipeTimer = 0;
-  private meowTimer = 0;
-  private elapsed = 0;
-  private carryingItem: CarryItem | null = null;
   private readonly preparations = new Set<string>();
-  private displayedPreparationCount = -1;
+
+  private readonly catAnimation: CatAnimationInput = { ...NEUTRAL_CAT_ANIMATION };
+  private catState: CatFrameState | null = null;
+  private readonly ownerPosition = new THREE.Vector3();
+  private readonly ownerTarget = new THREE.Vector3();
+  private readonly ownerDesired = new THREE.Vector3();
+  private readonly ownerLookAt = new THREE.Vector3();
+  private readonly scratchVector = new THREE.Vector3();
+  private readonly scratchVectorB = new THREE.Vector3();
+  private readonly lookTarget = new THREE.Vector3();
+  private readonly catFocus = new THREE.Vector3();
+
+  private ownerState: OwnerState = "routine";
+  private ownerStop = 0;
+  private ownerDwell = 0;
+  private ownerFacing = Math.PI;
+  private ownerSpeed = 0;
+  private ownerAlarm = 0;
+  private ownerSurprise = 0;
+  private ownerReach = 0;
+  private ownerCarrying = false;
+  private suspicion = 0;
+
+  private carrying: LiveProp | null = null;
   private sinkRunning = false;
-  private counterAccess = false;
+  private sinkTimer = 0;
+  private cupboardOpen = false;
+  private flourSpilled = false;
   private catastrophe = false;
   private caughtCount = 0;
-  private paused = false;
-  private debugVisible = false;
-  private inputMethod: InputFrame["method"] = "keyboard";
-  private settings: GameSettings = { masterVolume: .8, effectsVolume: .8, graphics: "high", reducedMotion: false, highContrast: false };
+  private backDoorOpen = false;
+  private backDoorAngle = 0;
+
+  private swipeTimer = 0;
+  private meowTimer = 0;
+  private caughtCooldown = 0;
+  private innocenceWeight = 0;
+  private catchSequence = 0;
+  private toastTimer = 0;
+  private zoneLabelTimer = 0;
+  private elapsed = 0;
+
   private started = false;
   private completed = false;
-  private caughtCooldown = 0;
+  private paused = false;
+  private debugVisible = false;
+  private debugLines: THREE.LineSegments | null = null;
+  private debugLinesAge = 0;
   private accumulator = 0;
   private lastFrameTime = performance.now() / 1000;
-  private facingAngle = 0;
-  private ownerFacing = Math.PI;
+  private smoothedFrameRate = 60;
+  private inputMethod: InputFrame["method"] = "keyboard";
+  private currentPrompt = "";
+  private stalkRequested = false;
+  private settings: GameSettings = {
+    masterVolume: 0.8, effectsVolume: 0.8, graphics: "high", reducedMotion: false, highContrast: false,
+  };
 
-  constructor(
+  private constructor(
     private readonly renderer: THREE.WebGLRenderer,
+    private readonly physics: PhysicsWorld,
     private readonly objectiveElement: HTMLElement,
     private readonly promptElement: HTMLElement,
     private readonly toastElement: HTMLElement,
     private readonly cameraLabelElement: HTMLElement,
     private readonly successElement: HTMLElement,
   ) {
-    this.zones = {
-      garden: {
-        id: "garden",
-        label: "THE GARDEN",
-        targetBase: new THREE.Vector3(-8.3, 0.6, 0),
-        cameraBase: new THREE.Vector3(-17.4, 10.7, 13.2),
-        deadX: 2.5,
-        deadZ: 2.2,
-        follow: 0.55,
-      },
-      kitchen: {
-        id: "kitchen",
-        label: "THE KITCHEN",
-        targetBase: new THREE.Vector3(2.1, 0.7, -0.1),
-        cameraBase: new THREE.Vector3(-2.8, 12.1, 14.9),
-        deadX: 2.6,
-        deadZ: 2.0,
-        follow: 0.48,
-      },
-      dining: {
-        id: "dining",
-        label: "THE BREAKFAST ROOM",
-        targetBase: new THREE.Vector3(10.4, 0.75, 0.3),
-        cameraBase: new THREE.Vector3(18.8, 10.4, 11.4),
-        deadX: 2.0,
-        deadZ: 2.0,
-        follow: 0.42,
-      },
-    };
+    this.level = buildLevel(this.scene, physics);
 
-    this.scene.background = new THREE.Color(0xd9caaa);
-    this.scene.fog = new THREE.Fog(0xd9caaa, 24, 46);
-    this.camera.position.copy(this.zones.garden.cameraBase);
-    this.camera.lookAt(this.currentCameraTarget);
+    this.cat = buildCat();
+    this.cat.root.position.copy(SPAWN.cat);
+    this.scene.add(this.cat.root);
+    this.catAnimator = new CatAnimator(this.cat);
+    this.controller = new CatController(physics, SPAWN.cat.clone());
 
-    this.buildLighting();
-    this.buildLevel();
-    this.buildCat();
-    this.buildOwner();
+    this.owner = buildOwner();
+    this.owner.root.position.copy(SPAWN.owner);
+    this.scene.add(this.owner.root);
+    this.ownerAnimator = new OwnerAnimator(this.owner);
+    this.ownerPosition.copy(SPAWN.owner);
+    this.ownerBody = physics.createCharacter(SPAWN.owner.clone(), 0.34, 0.62, { autostep: 0.3, snap: 0.35 });
+
+    this.buildProps();
+
+    this.director = new CameraDirector(this.camera, "garden");
     this.renderObjectives();
     this.resize();
     window.addEventListener("resize", () => this.resize());
+  }
+
+  /** Rapier ships as WASM, so construction is asynchronous. */
+  static async create(
+    renderer: THREE.WebGLRenderer,
+    objectiveElement: HTMLElement,
+    promptElement: HTMLElement,
+    toastElement: HTMLElement,
+    cameraLabelElement: HTMLElement,
+    successElement: HTMLElement,
+  ): Promise<CatscapadesGame> {
+    const physics = await PhysicsWorld.create();
+    return new CatscapadesGame(
+      renderer, physics, objectiveElement, promptElement, toastElement, cameraLabelElement, successElement,
+    );
   }
 
   start(): void {
@@ -185,13 +180,27 @@ export class CatscapadesGame {
     this.lastFrameTime = performance.now() / 1000;
   }
 
-  hasStarted(): boolean { return this.started; }
-  setPaused(value: boolean): void { this.paused = value; this.lastFrameTime = performance.now() / 1000; }
-  toggleDebug(): void { this.debugVisible = !this.debugVisible; document.querySelector("#debug-panel")?.classList.toggle("visible", this.debugVisible); }
+  hasStarted(): boolean {
+    return this.started;
+  }
+
+  setPaused(value: boolean): void {
+    this.paused = value;
+    this.lastFrameTime = performance.now() / 1000;
+    this.accumulator = 0;
+  }
+
+  toggleDebug(): void {
+    this.debugVisible = !this.debugVisible;
+    document.querySelector("#debug-panel")?.classList.toggle("visible", this.debugVisible);
+    if (this.debugLines) this.debugLines.visible = this.debugVisible;
+  }
+
   applySettings(settings: GameSettings): void {
     this.settings = settings;
     this.audio.setVolume(settings.masterVolume, settings.effectsVolume);
     this.renderer.shadowMap.enabled = settings.graphics === "high";
+    this.renderer.shadowMap.needsUpdate = true;
     document.body.classList.toggle("high-contrast", settings.highContrast);
     this.resize();
   }
@@ -200,476 +209,743 @@ export class CatscapadesGame {
     window.location.reload();
   }
 
+  /**
+   * Development-only: drop the cat at a world position. The capture tooling
+   * uses this to photograph a specific room or traversal without scripting a
+   * two-minute walk to get there. Never called from gameplay code.
+   */
+  debugTeleport(x: number, z: number, y = 1.2): void {
+    this.controller.teleport(this.scratchVector.set(x, y, z));
+    this.catAnimator.resetSecondaryMotion();
+    this.director.updateZone(x);
+  }
+
+  /**
+   * Development-only: advances the simulation by wall-clock-independent fixed
+   * steps with a synthetic input frame. Headless capture renders through
+   * SwiftShader at a few frames per second, which would otherwise put the
+   * fixed-step loop into slow motion and make scripted routes meaningless.
+   */
+  debugStep(seconds: number, input: Partial<InputFrame> = {}): void {
+    const frame: InputFrame = {
+      moveX: 0, moveY: 0, run: false, stalk: false,
+      actionPressed: false, meowPressed: false, pouncePressed: false,
+      pausePressed: false, debugPressed: false, method: this.inputMethod,
+      ...input,
+    };
+    const steps = Math.max(1, Math.round(seconds / FIXED_STEP));
+    for (let index = 0; index < steps; index += 1) {
+      this.fixedUpdate(FIXED_STEP, index === 0 ? frame : consumeEdges(frame));
+    }
+    // Presentation is driven from the same deltas so animation state matches.
+    this.updateCamera(seconds);
+    this.updateAnimation(seconds);
+    this.updatePresentation(seconds);
+    this.lastFrameTime = performance.now() / 1000;
+    this.accumulator = 0;
+  }
+
+  /** Development-only snapshot of simulation state, for automated checks. */
+  debugSnapshot(): Record<string, unknown> {
+    const state = this.catState;
+    return {
+      position: state ? [state.position.x, state.position.y, state.position.z] : null,
+      grounded: state?.grounded ?? null,
+      speed: state?.planarSpeed ?? 0,
+      gait: this.catAnimator.currentGait(),
+      jumpTarget: this.controller.availableJumpTarget()?.id ?? null,
+      prompt: this.currentPrompt,
+      cameraZone: this.director.currentZoneId(),
+      carrying: this.carrying?.spec.id ?? null,
+      preparations: [...this.preparations],
+      ownerState: this.ownerState,
+      suspicion: Math.round(this.suspicion),
+      objectives: this.objectives.filter((objective) => objective.complete).map((objective) => objective.id),
+      frameRate: Math.round(this.smoothedFrameRate),
+    };
+  }
+
   update(input: InputFrame): void {
     const now = performance.now() / 1000;
-    const frameDelta = Math.min(0.05, now - this.lastFrameTime);
+    const rawDelta = Math.max(1e-4, now - this.lastFrameTime);
+    // The simulation delta is clamped to stop a slow frame spiralling, but the
+    // reported rate must be the real one or the overlay hides the stall.
+    const frameDelta = Math.min(MAX_FRAME_DELTA, rawDelta);
+    this.smoothedFrameRate = damp(this.smoothedFrameRate, 1 / rawDelta, 4, frameDelta);
     this.lastFrameTime = now;
-
     this.inputMethod = input.method;
+
     if (this.started && !this.completed && !this.paused) {
-      this.accumulator += frameDelta;
+      this.accumulator = Math.min(this.accumulator + frameDelta, MAX_FRAME_DELTA);
       let firstStep = true;
       while (this.accumulator >= FIXED_STEP) {
-        const stepInput = firstStep
-          ? input
-          : { ...input, actionPressed: false, meowPressed: false, pouncePressed: false };
-        this.fixedUpdate(FIXED_STEP, stepInput);
+        this.fixedUpdate(FIXED_STEP, firstStep ? input : consumeEdges(input));
         this.accumulator -= FIXED_STEP;
         firstStep = false;
       }
     }
 
     this.updateCamera(frameDelta);
-    this.updateVisuals(frameDelta);
+    this.updateAnimation(frameDelta);
+    this.updatePresentation(frameDelta);
     this.updateDebug(frameDelta);
     this.renderer.render(this.scene, this.camera);
   }
 
+  // -- simulation ------------------------------------------------------------
+
   private fixedUpdate(dt: number, input: InputFrame): void {
     this.elapsed += dt;
-    this.pounceCooldown = Math.max(0, this.pounceCooldown - dt);
     this.swipeTimer = Math.max(0, this.swipeTimer - dt);
     this.meowTimer = Math.max(0, this.meowTimer - dt);
     this.caughtCooldown = Math.max(0, this.caughtCooldown - dt);
-    this.zoneLabelTimer = Math.max(0, this.zoneLabelTimer - dt);
     this.toastTimer = Math.max(0, this.toastTimer - dt);
+    this.zoneLabelTimer = Math.max(0, this.zoneLabelTimer - dt);
+    this.catchSequence = Math.max(0, this.catchSequence - dt);
 
-    this.handleActions(input);
-    this.updateCat(dt, input);
-    this.updateProps(dt);
+    const controllable = this.catchSequence <= 0;
+    this.stalkRequested = input.stalk && controllable;
+    this.catState = this.controller.update(
+      dt,
+      {
+        moveX: controllable ? input.moveX : 0,
+        moveY: controllable ? input.moveY : 0,
+        run: input.run,
+        stalk: input.stalk,
+        jumpPressed: controllable && input.pouncePressed,
+        carrying: this.carrying !== null,
+      },
+      this.director.forward(this.scratchVector),
+      this.director.right(this.scratchVectorB),
+    );
+
     this.updateOwner(dt);
+    this.physics.step();
+
+    this.cat.root.position.copy(this.catState.position);
+    this.cat.root.rotation.y = this.catState.facing;
+    this.ownerBody.feet(this.ownerPosition);
+    this.owner.root.position.copy(this.ownerPosition);
+    this.owner.root.rotation.y = this.ownerFacing;
+
+    if (controllable) this.handleActions(input);
+    this.updateWorldState(dt);
     this.updateObjectives();
-    this.updateZone();
-    this.updateUiTimers();
+    this.director.updateZone(this.catState.position.x);
+    if (this.director.consumeZoneChange()) {
+      this.zoneLabelTimer = 1.8;
+      this.cameraLabelElement.textContent = this.director.currentLabel();
+      this.cameraLabelElement.classList.add("visible");
+    }
   }
 
   private handleActions(input: InputFrame): void {
-    if (input.meowPressed && this.meowTimer <= 0 && !this.carryingItem) {
-      this.meowTimer = 0.85;
+    if (input.meowPressed && this.meowTimer <= 0) {
+      this.meowTimer = 0.9;
       this.audio.meow();
-      this.alertOwner(this.catPosition, "meow");
-      this.completeObjective("distract", "The homeowner has taken the bait.");
-    }
-
-    if (input.pouncePressed && this.pounceCooldown <= 0) {
-      this.pounceTimer = 0.46;
-      this.pounceCooldown = 0.72;
-      const forward = new THREE.Vector3(Math.sin(this.facingAngle), 0, Math.cos(this.facingAngle));
-      this.catVelocity.addScaledVector(forward, 4.6);
-      if (this.planarDistance(this.catPosition, new THREE.Vector3(5.3, 0, -4.15)) < 1.65) {
-        this.counterAccess = true;
-        this.showToast("A neat leap puts the key within whisker range.");
+      if (this.carrying) {
+        this.showToast("A muffled, entirely undignified mrrp.");
+      } else {
+        this.alertOwner(this.controller ? this.catPosition() : SPAWN.cat, "meow");
+        this.completeObjective("distract", "The homeowner turns towards the noise.");
+        if (this.catPosition().x < -2.6) {
+          this.backDoorOpen = true;
+          this.showToast("The back door swings open. How convenient.");
+        }
       }
     }
 
-    if (input.actionPressed && this.swipeTimer <= 0) {
-      if (this.trySpecialInteraction()) return;
-      if (this.tryCarryInteraction()) return;
-      if (this.tryActInnocent()) return;
-      this.swipeTimer = 0.34;
-      this.swipeNearestProp();
+    if (!input.actionPressed || this.swipeTimer > 0) return;
+    const choice = resolveInteraction(this.buildInteractionCandidates());
+    if (!choice) {
+      this.swipeTimer = 0.3;
+      this.showToast("An indignant little paw swipe at nothing in particular.");
+      return;
     }
+    this.performInteraction(choice.id);
   }
 
-  private updateCat(dt: number, input: InputFrame): void {
-    const forward = new THREE.Vector3();
-    this.camera.getWorldDirection(forward);
-    forward.y = 0;
-    if (forward.lengthSq() < 0.001) forward.set(0, 0, -1);
-    forward.normalize();
-    const right = new THREE.Vector3().crossVectors(forward, UP).normalize();
+  /**
+   * Builds every legal interaction this frame and lets the shared resolver pick.
+   * Objects never special-case themselves; they only describe what they offer.
+   */
+  private buildInteractionCandidates(): InteractionCandidate[] {
+    const candidates: InteractionCandidate[] = [];
+    const position = this.catPosition();
+    const facing = this.catState?.facing ?? 0;
 
-    this.moveDirection.set(0, 0, 0)
-      .addScaledVector(right, input.moveX)
-      .addScaledVector(forward, input.moveY);
-    const inputMagnitude = Math.min(1, this.moveDirection.length());
-    if (inputMagnitude > 0.001) this.moveDirection.normalize();
-
-    const baseSpeed = (input.stalk ? 2.05 : input.run ? 5.5 : 3.5) * (this.carryingItem ? 0.84 : 1);
-    const targetVelocity = this.moveDirection.multiplyScalar(baseSpeed * inputMagnitude);
-    const acceleration = inputMagnitude > 0 ? 19 : 25;
-    this.catVelocity.x = damp(this.catVelocity.x, targetVelocity.x, acceleration, dt);
-    this.catVelocity.z = damp(this.catVelocity.z, targetVelocity.z, acceleration, dt);
-
-    if (this.pounceTimer > 0) {
-      this.pounceTimer = Math.max(0, this.pounceTimer - dt);
-      const forwardImpulse = new THREE.Vector3(Math.sin(this.facingAngle), 0, Math.cos(this.facingAngle));
-      this.catVelocity.addScaledVector(forwardImpulse, dt * 4.2);
+    if (this.carrying) {
+      candidates.push({
+        id: "drop", verb: "drop", distance: 0, facing: 1, priority: 3, relevant: true, enabled: true,
+      });
     }
 
-    const next = this.catPosition.clone().addScaledVector(this.catVelocity, dt);
-    this.resolveWorldCollision(next, CAT_RADIUS);
-    this.catPosition.copy(next);
-    this.cat.position.set(this.catPosition.x, 0, this.catPosition.z);
-
-    const planarSpeed = Math.hypot(this.catVelocity.x, this.catVelocity.z);
-    if (planarSpeed > 0.15) {
-      const targetAngle = Math.atan2(this.catVelocity.x, this.catVelocity.z);
-      this.facingAngle = dampAngle(this.facingAngle, targetAngle, 13, dt);
-    }
-    this.cat.rotation.y = this.facingAngle;
-
-    if (this.catPosition.x > -2.6 && !this.objectives[0]?.complete) {
-      this.completeObjective("enter", "The kitchen has been infiltrated.");
-    }
-  }
-
-  private updateProps(dt: number): void {
     for (const prop of this.props) {
-      if (!prop.disturbed || prop.settled) continue;
+      if (prop.broken || prop === this.carrying) continue;
+      prop.body.position(this.scratchVector);
+      const distance = this.scratchVector.distanceTo(position);
+      const alignment = facingScore(position, facing, this.scratchVector);
 
-      prop.velocity.y -= 12.5 * dt;
-      prop.mesh.position.addScaledVector(prop.velocity, dt);
-      prop.mesh.rotation.x += prop.velocity.z * dt * 1.1;
-      prop.mesh.rotation.z -= prop.velocity.x * dt * 1.1;
-
-      const support = this.sampleSupport(prop.mesh.position.x, prop.mesh.position.z);
-      const floor = support + prop.radius;
-      if (prop.mesh.position.y <= floor) {
-        prop.mesh.position.y = floor;
-        if (Math.abs(prop.velocity.y) > 2.1 && !prop.crashPlayed) {
-          prop.crashPlayed = true;
-          this.audio.crash();
-          this.alertOwner(prop.mesh.position, "crash");
-        }
-        prop.velocity.y *= -0.23;
-        prop.velocity.x *= 0.72;
-        prop.velocity.z *= 0.72;
-        if (prop.velocity.lengthSq() < 0.09) {
-          prop.velocity.set(0, 0, 0);
-          prop.settled = true;
-        }
+      if (prop.spec.carryable && !this.carrying && distance < CARRY_REACH) {
+        candidates.push({
+          id: `carry:${prop.spec.id}`, verb: "grab", distance, facing: alignment,
+          priority: prop.spec.id === "key" ? 4 : 2,
+          relevant: prop.spec.id === "key" && !this.isComplete("key"),
+          enabled: true,
+        });
       }
+      if (distance < SWIPE_REACH) {
+        candidates.push({
+          id: `swipe:${prop.spec.id}`, verb: "swipe", distance, facing: alignment,
+          priority: prop.spec.fragile ? 2 : 1,
+          relevant: Boolean(prop.spec.fragile) && this.preparations.size >= 2,
+          enabled: true,
+        });
+      }
+    }
+
+    for (const station of STATIONS) {
+      if (!this.isStationAvailable(station)) continue;
+      this.scratchVector.set(station.position[0], station.position[1], station.position[2]);
+      const distance = Math.hypot(this.scratchVector.x - position.x, this.scratchVector.z - position.z);
+      if (distance > station.radius) continue;
+      if (station.minHeight !== undefined && position.y < station.minHeight) continue;
+      candidates.push({
+        id: `station:${station.id}`, verb: station.id === "box" ? "innocent" : "activate",
+        distance, facing: facingScore(position, facing, this.scratchVector),
+        priority: station.id === "box" ? 5 : 3,
+        relevant: station.id === "box" ? this.canActInnocent() : true,
+        enabled: station.id !== "box" || this.canActInnocent(),
+      });
+    }
+
+    return candidates;
+  }
+
+  private isStationAvailable(station: StationSpec): boolean {
+    if (station.id === "sink") return !this.sinkRunning;
+    if (station.id === "flour") return !this.flourSpilled;
+    if (station.id === "cupboard") return !this.cupboardOpen;
+    return true;
+  }
+
+  private performInteraction(id: string): void {
+    const [kind, key = ""] = id.split(":");
+
+    if (kind === "drop") {
+      this.dropCarried();
+      return;
+    }
+    if (kind === "carry") {
+      const prop = this.props.find((candidate) => candidate.spec.id === key);
+      if (!prop) return;
+      this.carrying = prop;
+      prop.body.setCarried(true);
+      this.audio.meow();
+      if (key === "key") this.completeObjective("key", "The key is yours. The counter was no obstacle.");
+      this.showToast(`Carrying ${prop.spec.label}.`);
+      return;
+    }
+    if (kind === "swipe") {
+      this.swipeTimer = 0.42;
+      const prop = this.props.find((candidate) => candidate.spec.id === key);
+      if (prop) this.swipeProp(prop);
+      return;
+    }
+    if (kind === "station") {
+      this.swipeTimer = 0.42;
+      this.activateStation(key);
     }
   }
 
-  private updateOwner(dt: number): void {
-    if (this.ownerState === "routine") {
-      this.ownerTarget.copy(this.ownerRoutine[this.ownerRoutineIndex] ?? this.ownerRoutine[0]!);
-      if (this.moveOwnerToward(this.ownerTarget, 1.25, dt)) {
-        this.ownerWait += dt;
-        if (this.ownerWait > 2.2) {
-          this.ownerWait = 0;
-          this.ownerRoutineIndex = (this.ownerRoutineIndex + 1) % this.ownerRoutine.length;
-        }
-      }
-    } else if (this.ownerState === "investigating") {
-      if (this.moveOwnerToward(this.ownerTarget, 2.0, dt)) {
-        this.ownerWait += dt;
-        if (this.ownerWait > 2.8) {
-          this.ownerWait = 0;
-          this.ownerState = "returning";
-        }
-      }
-    } else {
-      const routineTarget = this.ownerRoutine[this.ownerRoutineIndex] ?? this.ownerRoutine[0]!;
-      if (this.moveOwnerToward(routineTarget, 1.5, dt)) this.ownerState = "routine";
+  private activateStation(id: string): void {
+    if (id === "sink" && !this.sinkRunning) {
+      this.sinkRunning = true;
+      this.level.sinkStream.visible = true;
+      this.level.sinkPool.visible = true;
+      this.markPreparation("sink", "The tap gurgles into life. Nobody will notice for ages.");
+      return;
     }
-
-    const catDistance = this.owner.position.distanceTo(this.cat.position);
-    if (
-      catDistance < 1.35
-      && this.catPosition.x > -3
-      && this.caughtCooldown <= 0
-      && this.ownerState !== "routine"
-    ) {
-      this.catchCat();
+    if (id === "flour" && !this.flourSpilled) {
+      this.flourSpilled = true;
+      const sack = this.level.flourBag.parts?.sack;
+      const spill = this.level.flourBag.parts?.spill;
+      const cloud = this.level.flourBag.parts?.cloud;
+      if (sack) {
+        sack.rotation.z = 1.15;
+        sack.position.y = -0.02;
+        sack.scale.y = 0.62;
+      }
+      if (spill) spill.visible = true;
+      if (cloud) cloud.visible = true;
+      this.markPreparation("flour", "A white cloud settles over everything within reach.");
+      return;
     }
-
-    this.ownerAlert.visible = this.ownerState === "investigating";
+    if (id === "cupboard" && !this.cupboardOpen) {
+      this.cupboardOpen = true;
+      this.markPreparation("cupboard", "The cupboard hangs open, deeply suspicious.");
+      return;
+    }
+    if (id === "box") this.actInnocent();
   }
 
-  private updateObjectives(): void {
-    const mug = this.props.find((prop) => prop.id === "red-mug");
-    if (mug?.disturbed && mug.mesh.position.y < 1.0 && this.preparations.size >= 2 && !this.catastrophe) {
-      this.catastrophe = true;
-      this.completeObjective("catastrophe", "FLOUR! WATER! CROCKERY! A perfectly ruined morning.");
-      this.audio.success();
+  private swipeProp(prop: LiveProp): void {
+    prop.body.position(this.scratchVector);
+    const away = this.scratchVector.clone().sub(this.catPosition());
+    away.y = 0;
+    if (away.lengthSq() < 1e-4) {
+      const facing = this.catState?.facing ?? 0;
+      away.set(Math.sin(facing), 0, Math.cos(facing));
     }
-    if (this.carryingItem?.id === "key" && this.catPosition.distanceTo(this.boxPosition) < 1.7) this.completeObjective("key-box", "The key has joined the outdoor collection.");
-    if (this.catPosition.distanceTo(new THREE.Vector3(10.3, 0, 2.1)) < .85 && this.pounceTimer > 0) this.completeObjective("fruit", "The fruit bowl has improved immeasurably.");
-    const prepare = this.objectives.find((objective) => objective.id === "prepare");
-    if (prepare && !prepare.complete) prepare.text = `Prepare two disasters (${Math.min(2, this.preparations.size)}/2)`;
-    if (this.preparations.size >= 2) this.completeObjective("prepare", "The trap is set. Swipe the red mug to begin the finale.");
-    else if (this.displayedPreparationCount !== this.preparations.size) {
-      this.displayedPreparationCount = this.preparations.size;
-      this.renderObjectives();
+    // Impulse is scaled by mass so every prop leaves the paw at a similar
+    // speed: a swipe is a flick of the wrist, not a fixed quantity of force.
+    const launch = prop.spec.fragile ? 2.9 : 2.3;
+    away.normalize().multiplyScalar(prop.mass * launch);
+    away.y = prop.mass * 1.6;
+    prop.body.applyImpulse(away, prop.mass * 0.5);
+    this.audio.crash();
+    this.emitStimulus(this.scratchVector, 1.1, "swipe");
+  }
+
+  private dropCarried(): void {
+    const prop = this.carrying;
+    if (!prop) return;
+    this.carrying = null;
+    prop.body.setCarried(false);
+    this.cat.mouthAnchor.getWorldPosition(this.scratchVector);
+    this.scratchVector.y = Math.max(this.scratchVector.y, this.catPosition().y + prop.restOffset);
+    prop.body.teleport(this.scratchVector);
+
+    if (prop.spec.id === "sock" && this.sinkRunning
+      && Math.hypot(this.scratchVector.x - 1.9, this.scratchVector.z + 7.1) < 1.9 && this.scratchVector.y > 1.0) {
+      this.completeObjective("sock-sink", "Sock soup. An ambitious new recipe.");
     }
-    if (this.completed && this.caughtCount === 0) this.completeObjective("uncaught", "Untouched. Uncatchable. Unreasonably smug.");
+    if (prop.spec.id === "key" && this.scratchVector.distanceTo(this.scratchVectorB.set(-11.4, 0.3, 4.1)) < 1.9) {
+      this.completeObjective("key-box", "The key has joined your outdoor collection.");
+    }
+    this.showToast(`Dropped ${prop.spec.label}.`);
+  }
+
+  private actInnocent(): void {
+    if (!this.canActInnocent()) return;
+    this.completeObjective("innocent", "Fast asleep. Has been all morning, obviously.");
+    this.completed = true;
+    if (this.caughtCount === 0) this.completeObjective("uncaught", "Never once caught. Unbearably smug.");
+    this.audio.success();
+    window.setTimeout(() => this.successElement.classList.add("visible"), 600);
+  }
+
+  private canActInnocent(): boolean {
+    return this.catastrophe
+      && this.objectives
+        .filter((objective) => !objective.optional && objective.id !== "innocent")
+        .every((objective) => objective.complete);
   }
 
   private markPreparation(id: string, message: string): void {
     if (this.preparations.has(id)) return;
     this.preparations.add(id);
     this.showToast(message);
-    this.alertOwner(this.catPosition, "swipe");
-  }
-  private updateZone(): void {
-    const next = selectCameraZone(this.currentZone, this.catPosition.x) as ZoneId;
-
-    if (next !== this.currentZone) {
-      this.previousZone = this.currentZone;
-      this.currentZone = next;
-      this.zoneLabelTimer = 1.7;
-      this.cameraLabelElement.textContent = this.zones[next].label;
-      this.cameraLabelElement.classList.add("visible");
-    }
+    this.emitStimulus(this.catPosition(), 0.9, "swipe");
+    this.renderObjectives();
   }
 
-  private updateCamera(dt: number): void {
-    const zone = this.zones[this.currentZone];
-    const offsetX = deadZoneOffset(this.catPosition.x - zone.targetBase.x, zone.deadX);
-    const offsetZ = deadZoneOffset(this.catPosition.z - zone.targetBase.z, zone.deadZ);
+  // -- world state -----------------------------------------------------------
 
-    this.desiredCameraTarget.copy(zone.targetBase);
-    this.desiredCameraTarget.x += offsetX * zone.follow;
-    this.desiredCameraTarget.z += offsetZ * zone.follow;
-    this.desiredCameraTarget.y += 0.12;
-
-    this.desiredCameraPosition.copy(zone.cameraBase);
-    this.desiredCameraPosition.x += offsetX * zone.follow * 0.65;
-    this.desiredCameraPosition.z += offsetZ * zone.follow * 0.42;
-
-    const cameraRate = this.settings.reducedMotion ? 7 : this.previousZone === this.currentZone ? 4.8 : 2.7;
-    this.camera.position.lerp(this.desiredCameraPosition, 1 - Math.exp(-cameraRate * dt));
-    this.currentCameraTarget.lerp(this.desiredCameraTarget, 1 - Math.exp(-5.2 * dt));
-    this.camera.lookAt(this.currentCameraTarget);
-
-    if (this.camera.position.distanceToSquared(this.desiredCameraPosition) < 0.02) {
-      this.previousZone = this.currentZone;
-    }
-  }
-
-  private updateVisuals(_dt: number): void {
-    const speed = Math.hypot(this.catVelocity.x, this.catVelocity.z);
-    const walkPhase = this.elapsed * (5.5 + speed * 1.2);
-    const pounceProgress = this.pounceTimer > 0 ? 1 - this.pounceTimer / 0.46 : 0;
-    const hop = this.pounceTimer > 0 ? Math.sin(pounceProgress * Math.PI) * 0.72 : 0;
-    this.catVisual.position.y = 0.54 + hop + Math.sin(walkPhase) * Math.min(0.045, speed * 0.009);
-    this.catVisual.rotation.z = Math.sin(walkPhase) * Math.min(0.035, speed * 0.008);
-    this.catTail.rotation.z = -0.45 + Math.sin(this.elapsed * 3.6) * 0.22;
-    this.catTail.rotation.y = Math.sin(this.elapsed * 2.1) * 0.14;
-
-    const leftPaw = this.cat.getObjectByName("left-paw");
-    if (leftPaw) {
-      const swipeProgress = this.swipeTimer > 0 ? 1 - this.swipeTimer / 0.34 : 0;
-      leftPaw.rotation.x = this.swipeTimer > 0 ? -Math.sin(swipeProgress * Math.PI) * 1.5 : 0;
-    }
-
-    const mouth = this.cat.getObjectByName("mouth-anchor");
-    if (mouth && this.carryingItem) {
-      mouth.getWorldPosition(this.carryingItem.mesh.position);
-      this.carryingItem.mesh.position.y -= 0.05;
-      this.carryingItem.mesh.rotation.set(Math.PI / 2, this.facingAngle, 0);
-    }
-
-    this.promptElement.textContent = this.getPrompt();
-    this.promptElement.classList.toggle("visible", this.promptElement.textContent.length > 0 && this.started && !this.completed);
-  }
-
-  private updateUiTimers(): void {
-    if (this.zoneLabelTimer <= 0) this.cameraLabelElement.classList.remove("visible");
-    if (this.toastTimer <= 0) this.toastElement.classList.remove("visible");
-  }
-
-  private getPrompt(): string {
-    if (!this.started || this.completed) return "";
-    const action = this.inputMethod === "gamepad" ? "A" : "E";
-    if (this.canActInnocent()) return `${action} — curl up and look innocent`;
-    if (this.carryingItem) return `${action} — drop ${this.carryingItem.label}`;
-    const item = this.nearestCarryItem();
-    if (item) return `${action} — carry ${item.label}`;
-    if (!this.counterAccess && this.planarDistance(this.catPosition, new THREE.Vector3(5.3, 0, -4.15)) < 1.65) return `${this.inputMethod === "gamepad" ? "B" : "SPACE"} — leap up for the key`;
-    if (this.planarDistance(this.catPosition, new THREE.Vector3(4.7, 0, -4.2)) < 1.5 && !this.sinkRunning) return `${action} — turn on the sink`;
-    if (this.planarDistance(this.catPosition, new THREE.Vector3(1.2, 0, -4.4)) < 1.5 && !this.preparations.has("flour")) return `${action} — puncture the flour bag`;
-    if (this.planarDistance(this.catPosition, new THREE.Vector3(6.1, 0, -3.5)) < 1.5 && !this.preparations.has("cupboard")) return `${action} — open the cupboard`;
-    const prop = this.findNearestProp(1.65);
-    if (prop) return "E / PAW — swipe " + (prop.id === "red-mug" ? "the red mug" : "this object");
-    return "";
-  }
-
-  private trySpecialInteraction(): boolean {
-    if (this.planarDistance(this.catPosition, new THREE.Vector3(4.7, 0, -4.2)) < 1.5 && !this.sinkRunning) { this.sinkRunning = true; this.sinkWater.visible = true; this.markPreparation("sink", "The sink burbles ominously."); return true; }
-    if (this.planarDistance(this.catPosition, new THREE.Vector3(1.2, 0, -4.4)) < 1.5 && !this.preparations.has("flour")) { this.flourBag.rotation.z = .7; this.flourBag.scale.y = .55; this.markPreparation("flour", "A white flour cloud settles across the floor."); return true; }
-    if (this.planarDistance(this.catPosition, new THREE.Vector3(6.1, 0, -3.5)) < 1.5 && !this.preparations.has("cupboard")) { this.cupboardDoor.rotation.y = -1.2; this.markPreparation("cupboard", "The cupboard hangs suspiciously open."); return true; }
-    return false;
-  }
-
-  private nearestCarryItem(): CarryItem | null {
-    return this.carryItems.find((item) => item !== this.carryingItem && item.mesh.visible
-      && (item.id !== "key" || this.counterAccess) && this.planarDistance(item.mesh.position, this.cat.position) < 1.35) ?? null;
-  }
-
-  private planarDistance(a: THREE.Vector3, b: THREE.Vector3): number { return Math.hypot(a.x - b.x, a.z - b.z); }
-
-  private tryCarryInteraction(): boolean {
-    if (this.carryingItem) {
-      const item = this.carryingItem;
-      this.carryingItem = null;
-      item.mesh.position.copy(this.cat.position).add(new THREE.Vector3(Math.sin(this.facingAngle), .25, Math.cos(this.facingAngle)));
-      if (item.id === "sock" && this.sinkRunning && item.mesh.position.distanceTo(new THREE.Vector3(4.7, .25, -4.2)) < 2) this.completeObjective("sock-sink", "Sock soup. A challenging new recipe.");
-      return true;
-    }
-    const item = this.nearestCarryItem();
-    if (!item) return false;
-    this.carryingItem = item;
-    if (item.id === "key") this.completeObjective("key", "Key acquired. The guarded counter was no match.");
-    return true;
-  }
-
-  private tryActInnocent(): boolean {
-    if (!this.canActInnocent()) return false;
-    this.completeObjective("innocent", "No one suspects a thing.");
-    this.completed = true;
-    this.catVelocity.set(0, 0, 0);
-    this.audio.success();
-    window.setTimeout(() => this.successElement.classList.add("visible"), 350);
-    return true;
-  }
-
-  private canActInnocent(): boolean {
-    return this.catastrophe
-      && this.objectives.filter((objective) => !objective.optional && objective.id !== "innocent").every((objective) => objective.complete)
-      && this.catPosition.distanceTo(this.boxPosition) < 1.6;
-  }
-
-  private swipeNearestProp(): void {
-    const prop = this.findNearestProp(1.7);
-    if (!prop) {
-      this.showToast("An indignant little paw swipe.");
-      return;
-    }
-    const away = prop.mesh.position.clone().sub(this.cat.position);
-    away.y = 0;
-    if (away.lengthSq() < 0.001) away.set(Math.sin(this.facingAngle), 0, Math.cos(this.facingAngle));
-    away.normalize();
-    prop.disturbed = true;
-    prop.settled = false;
-    prop.velocity.addScaledVector(away, 4.4);
-    prop.velocity.y = Math.max(prop.velocity.y, 2.7);
-    this.alertOwner(prop.mesh.position, "swipe");
-  }
-
-  private findNearestProp(maxDistance: number): DynamicProp | null {
-    let nearest: DynamicProp | null = null;
-    let nearestDistance = maxDistance;
-    for (const prop of this.props) {
-      const dx = prop.mesh.position.x - this.catPosition.x;
-      const dz = prop.mesh.position.z - this.catPosition.z;
-      const distance = Math.hypot(dx, dz);
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
-        nearest = prop;
+  private updateWorldState(dt: number): void {
+    // Sink escalation: running → pooling → overflowing across the floor.
+    if (this.sinkRunning) {
+      this.sinkTimer += dt;
+      const overflow = smoothstep(6, 14, this.sinkTimer);
+      this.level.sinkOverflow.visible = overflow > 0.02;
+      this.level.sinkOverflow.scale.set(0.4 + overflow, 1, 0.4 + overflow);
+      this.level.puddle.visible = overflow > 0.15;
+      this.level.puddle.scale.setScalar(Math.max(0.001, overflow * 1.5));
+      if (overflow > 0.6 && !this.preparations.has("overflow")) {
+        this.preparations.add("overflow");
+        this.showToast("Water is now exploring the kitchen floor.");
       }
     }
-    return nearest;
-  }
 
-  private alertOwner(position: THREE.Vector3, kind: "meow" | "crash" | "swipe"): void {
-    this.ownerTarget.copy(this.makeAccessibleTarget(position));
-    this.ownerState = "investigating";
-    this.ownerWait = 0;
-    if (kind === "crash") this.showToast("CRASH! The owner is investigating.");
-  }
+    this.level.cupboardDoor.rotation.y = damp(
+      this.level.cupboardDoor.rotation.y, this.cupboardOpen ? -1.32 : 0, 6, dt,
+    );
+    this.backDoorAngle = damp(this.backDoorAngle, this.backDoorOpen ? -1.5 : 0, 4, dt);
+    this.level.backDoor.rotation.y = this.backDoorAngle;
 
-
-  private makeAccessibleTarget(position: THREE.Vector3): THREE.Vector3 {
-    const target = new THREE.Vector3(position.x, 0, position.z);
-    const margin = 0.64;
-    for (const collider of this.colliders) {
-      const minX = collider.minX - margin;
-      const maxX = collider.maxX + margin;
-      const minZ = collider.minZ - margin;
-      const maxZ = collider.maxZ + margin;
-      if (target.x < minX || target.x > maxX || target.z < minZ || target.z > maxZ) continue;
-
-      const exits = [
-        { distance: Math.abs(target.x - minX), axis: "x" as const, value: minX },
-        { distance: Math.abs(maxX - target.x), axis: "x" as const, value: maxX },
-        { distance: Math.abs(target.z - minZ), axis: "z" as const, value: minZ },
-        { distance: Math.abs(maxZ - target.z), axis: "z" as const, value: maxZ },
-      ].sort((a, b) => a.distance - b.distance);
-      const exit = exits[0];
-      if (!exit) continue;
-      target[exit.axis] = exit.value;
+    for (const prop of this.props) {
+      prop.body.syncTo(prop.object);
+      if (prop.broken) continue;
+      prop.body.position(this.scratchVector);
+      // A fragile prop that has fallen well below its rest height has broken.
+      if (prop.spec.fragile && this.scratchVector.y < prop.settledHeight - 0.55 && prop.body.speed() < 0.6) {
+        this.breakProp(prop);
+      }
+      if (!prop.spec.fragile && prop.body.speed() > 2.4) {
+        this.emitStimulus(this.scratchVector, 0.8, "crash");
+      }
     }
-    target.x = THREE.MathUtils.clamp(target.x, -13.4, 13.4);
-    target.z = THREE.MathUtils.clamp(target.z, -7.0, 7.0);
-    return target;
   }
 
-  private catchCat(): void {
-    this.caughtCooldown = 3;
-    this.caughtCount += 1;
-    this.catPosition.copy(this.boxPosition).add(new THREE.Vector3(0, 0, -1.2));
-    this.catVelocity.set(0, 0, 0);
-    this.cat.position.set(this.catPosition.x, 0, this.catPosition.z);
-    this.ownerState = "returning";
-    this.ownerWait = 0;
-    if (this.carryingItem) {
-      this.carryingItem.mesh.position.copy(this.carryingItem.home);
-      this.carryingItem = null;
+  private breakProp(prop: LiveProp): void {
+    prop.broken = true;
+    prop.object.visible = false;
+    prop.body.position(this.scratchVector);
+    const shards = buildMugShards().object;
+    shards.position.set(this.scratchVector.x, Math.max(0.02, this.scratchVector.y - 0.1), this.scratchVector.z);
+    this.scene.add(shards);
+    this.audio.crash();
+    this.emitStimulus(this.scratchVector, 2.2, "crash");
+    this.showToast("CRASH. That mug had been in the family for weeks.");
+
+    if (this.preparations.size >= 2 && !this.catastrophe) {
+      this.catastrophe = true;
+      this.completeObjective("catastrophe", "Flour. Water. Crockery. A perfectly ruined morning.");
+      this.audio.success();
+      this.suspicion = 100;
+    } else if (!this.catastrophe) {
+      this.showToast("Satisfying — but the kitchen is not nearly ruined enough yet.");
     }
-    this.showToast("Caught! Deposited outside with great dignity.");
+  }
+
+  // -- homeowner -------------------------------------------------------------
+
+  private updateOwner(dt: number): void {
+    const catPosition = this.catPosition();
+    const toCat = this.ownerPosition.distanceTo(catPosition);
+    const catVisible = toCat < 7.5 && this.innocenceWeight < 0.5;
+
+    if (this.ownerState === "routine") {
+      const stop = OWNER_ROUTINE[this.ownerStop] ?? OWNER_ROUTINE[0];
+      if (stop) {
+        this.ownerTarget.set(stop.position[0], 0, stop.position[1]);
+        this.ownerReach = stop.action === "reach" ? 1 : 0;
+        this.ownerCarrying = stop.action === "carry";
+        if (stop.lookAt) this.ownerLookAt.set(stop.lookAt[0], stop.lookAt[1], stop.lookAt[2]);
+        if (this.moveOwnerToward(this.ownerTarget, 1.35, dt)) {
+          this.ownerDwell += dt;
+          if (this.ownerDwell > stop.dwell) {
+            this.ownerDwell = 0;
+            this.ownerStop = (this.ownerStop + 1) % OWNER_ROUTINE.length;
+          }
+        }
+      }
+      // Notice the cat only when it is close, in the house, and not hiding.
+      if (catVisible && toCat < 4.2 && catPosition.x > -3.0 && this.innocenceWeight < 0.2) {
+        this.suspicion = Math.min(100, this.suspicion + dt * 14);
+        if (this.suspicion > 55) this.beginPursuit();
+      } else {
+        this.suspicion = Math.max(0, this.suspicion - dt * 6);
+      }
+    } else if (this.ownerState === "investigating") {
+      this.ownerReach = 0;
+      this.ownerCarrying = false;
+      if (this.moveOwnerToward(this.ownerTarget, 2.1, dt)) {
+        this.ownerDwell += dt;
+        this.ownerReach = smoothstep(0.6, 1.4, this.ownerDwell);
+        if (this.ownerDwell > 3.0) {
+          this.ownerDwell = 0;
+          this.ownerState = "returning";
+        }
+      }
+      if (catVisible && toCat < 3.4 && this.suspicion > 45) this.beginPursuit();
+    } else if (this.ownerState === "pursuing") {
+      this.ownerReach = smoothstep(2.2, 1.2, toCat);
+      this.ownerTarget.copy(catPosition);
+      this.moveOwnerToward(this.ownerTarget, 2.75, dt);
+      this.ownerLookAt.copy(catPosition).setY(catPosition.y + 0.3);
+      if (toCat < CATCH_DISTANCE && this.caughtCooldown <= 0 && (this.catState?.grounded ?? true)) {
+        this.catchCat();
+      }
+      this.suspicion = Math.max(0, this.suspicion - dt * 4);
+      if (this.suspicion < 20 || toCat > 9 || this.innocenceWeight > 0.6) {
+        this.ownerState = "returning";
+        this.ownerDwell = 0;
+      }
+    } else {
+      this.ownerReach = 0;
+      this.ownerCarrying = false;
+      const stop = OWNER_ROUTINE[this.ownerStop] ?? OWNER_ROUTINE[0];
+      if (stop) {
+        this.ownerTarget.set(stop.position[0], 0, stop.position[1]);
+        if (this.moveOwnerToward(this.ownerTarget, 1.7, dt)) this.ownerState = "routine";
+      }
+    }
+
+    this.ownerAlarm = damp(
+      this.ownerAlarm,
+      this.ownerState === "pursuing" ? 1 : this.ownerState === "investigating" ? 0.7 : this.suspicion / 140,
+      4, dt,
+    );
+    this.ownerSurprise = Math.max(0, this.ownerSurprise - dt * 1.6);
+  }
+
+  private beginPursuit(): void {
+    if (this.ownerState === "pursuing") return;
+    this.ownerState = "pursuing";
+    this.ownerSurprise = 1;
+    this.ownerDwell = 0;
+    this.showToast("You have been spotted. Act natural. Or run.");
   }
 
   private moveOwnerToward(target: THREE.Vector3, speed: number, dt: number): boolean {
-    const direction = target.clone().sub(this.owner.position);
-    direction.y = 0;
-    const distance = direction.length();
-    if (distance < 0.18) return true;
-    direction.normalize();
-    const next = this.owner.position.clone().addScaledVector(direction, Math.min(distance, speed * dt));
-    this.resolveWorldCollision(next, 0.48);
-    this.owner.position.copy(next);
-    const targetAngle = Math.atan2(direction.x, direction.z);
-    this.ownerFacing = dampAngle(this.ownerFacing, targetAngle, 8, dt);
-    this.owner.rotation.y = this.ownerFacing;
+    this.ownerDesired.set(target.x - this.ownerPosition.x, 0, target.z - this.ownerPosition.z);
+    const distance = this.ownerDesired.length();
+    if (distance < 0.2) {
+      this.ownerSpeed = damp(this.ownerSpeed, 0, 8, dt);
+      this.ownerBody.move(this.scratchVector.set(0, -0.2 * dt, 0));
+      return true;
+    }
+    this.ownerDesired.normalize();
+    const step = Math.min(distance, speed * dt);
+    this.ownerSpeed = damp(this.ownerSpeed, speed, 6, dt);
+    this.ownerBody.move(this.scratchVector.set(
+      this.ownerDesired.x * step, -0.2 * dt, this.ownerDesired.z * step,
+    ));
+    this.ownerFacing = dampAngle(
+      this.ownerFacing, Math.atan2(this.ownerDesired.x, this.ownerDesired.z), 7, dt,
+    );
     return false;
   }
 
-  private resolveWorldCollision(position: THREE.Vector3, radius: number): void {
-    position.x = THREE.MathUtils.clamp(position.x, -14.15 + radius, 14.15 - radius);
-    position.z = THREE.MathUtils.clamp(position.z, -7.7 + radius, 7.7 - radius);
+  /** A stimulus the homeowner may choose to walk over and inspect. */
+  private emitStimulus(position: THREE.Vector3, intensity: number, kind: "meow" | "crash" | "swipe"): void {
+    this.suspicion = Math.min(100, this.suspicion + intensity * 7);
+    if (this.ownerState === "pursuing") return;
+    const distance = this.ownerPosition.distanceTo(position);
+    if (distance > 14) return;
+    if (intensity < 0.9 && this.ownerState === "investigating") return;
+    this.ownerTarget.set(position.x, 0, position.z);
+    this.ownerLookAt.copy(position);
+    this.ownerState = "investigating";
+    this.ownerDwell = 0;
+    this.ownerSurprise = Math.min(1, intensity * 0.6);
+    if (kind === "crash") this.showToast("CRASH. Footsteps are approaching.");
+  }
 
-    for (const collider of this.colliders) {
-      const closestX = THREE.MathUtils.clamp(position.x, collider.minX, collider.maxX);
-      const closestZ = THREE.MathUtils.clamp(position.z, collider.minZ, collider.maxZ);
-      let dx = position.x - closestX;
-      let dz = position.z - closestZ;
-      const distanceSq = dx * dx + dz * dz;
-      if (distanceSq >= radius * radius) continue;
+  private alertOwner(position: THREE.Vector3, kind: "meow" | "crash" | "swipe"): void {
+    this.emitStimulus(position, 1.2, kind);
+  }
 
-      if (distanceSq < 0.000001) {
-        const left = Math.abs(position.x - collider.minX);
-        const right = Math.abs(collider.maxX - position.x);
-        const top = Math.abs(position.z - collider.minZ);
-        const bottom = Math.abs(collider.maxZ - position.z);
-        const minimum = Math.min(left, right, top, bottom);
-        if (minimum === left) position.x = collider.minX - radius;
-        else if (minimum === right) position.x = collider.maxX + radius;
-        else if (minimum === top) position.z = collider.minZ - radius;
-        else position.z = collider.maxZ + radius;
-        continue;
-      }
+  private catchCat(): void {
+    this.caughtCooldown = 4;
+    this.caughtCount += 1;
+    this.catchSequence = 1.4;
+    if (this.carrying) {
+      const prop = this.carrying;
+      this.carrying = null;
+      prop.body.setCarried(false);
+      prop.body.teleport(prop.body.spawn);
+    }
+    this.controller.teleport(this.scratchVector.set(SPAWN.cat.x, SPAWN.cat.y, SPAWN.cat.z));
+    this.catAnimator.resetSecondaryMotion();
+    this.ownerState = "returning";
+    this.ownerDwell = 0;
+    this.suspicion = 30;
+    this.showToast("Caught, carried outside, and deposited with great ceremony.");
+  }
 
-      const distance = Math.sqrt(distanceSq);
-      dx /= distance;
-      dz /= distance;
-      const penetration = radius - distance;
-      position.x += dx * penetration;
-      position.z += dz * penetration;
+  // -- presentation ----------------------------------------------------------
+
+  private updateCamera(dt: number): void {
+    const state = this.catState;
+    if (!state) return;
+    this.catFocus.copy(state.position);
+    this.catFocus.y += 0.35;
+    this.director.update(dt, this.catFocus, state.velocity, this.settings.reducedMotion);
+  }
+
+  private updateAnimation(dt: number): void {
+    const state = this.catState;
+    if (!state) return;
+
+    // Curling up in the box is a real hiding state, not only the ending: it
+    // reduces the homeowner's ability to spot the cat while it is held.
+    const inBox = Math.hypot(state.position.x + 11.4, state.position.z - 4.1) < 1.2
+      && state.planarSpeed < 0.4 && state.grounded;
+    const innocenceTarget = this.completed ? 1 : inBox ? 0.85 : 0;
+    this.innocenceWeight = damp(this.innocenceWeight, innocenceTarget, this.completed ? 2.2 : 3.4, dt);
+
+    const animation = this.catAnimation;
+    Object.assign(animation, NEUTRAL_CAT_ANIMATION);
+    animation.speed = state.planarSpeed;
+    animation.turnRate = state.turnRate;
+    animation.acceleration = state.acceleration;
+    animation.stalking = !this.completed && this.stalkRequested;
+    animation.airborne = state.airborne;
+    animation.jumpProgress = state.jumpProgress;
+    animation.landImpact = state.landImpact;
+    animation.swipe = this.swipeTimer > 0 ? 1 - this.swipeTimer / 0.42 : 0;
+    animation.meow = this.meowTimer > 0 ? Math.sin((1 - this.meowTimer / 0.9) * Math.PI) : 0;
+    animation.carrying = this.carrying !== null;
+    animation.sleeping = this.innocenceWeight;
+    animation.alert = clamp(
+      (this.ownerState === "pursuing" ? 1 : 0)
+      + (this.controller.availableJumpTarget() ? 0.55 : 0)
+      + (this.meowTimer > 0 ? 0.4 : 0),
+      0, 1,
+    );
+    animation.lookAt = this.resolveLookTarget(state.position);
+    this.catAnimator.update(dt, animation);
+
+    this.ownerAnimator.update(dt, {
+      speed: this.ownerSpeed,
+      turnRate: 0,
+      alarm: this.ownerAlarm,
+      surprise: this.ownerSurprise,
+      reaching: this.ownerReach,
+      carrying: this.ownerCarrying,
+      lookAt: this.ownerLookAt,
+    });
+
+    // Carried props ride the mouth socket rather than being re-simulated.
+    if (this.carrying) {
+      this.cat.mouthAnchor.updateWorldMatrix(true, false);
+      this.cat.mouthAnchor.getWorldPosition(this.carrying.object.position);
+      this.cat.mouthAnchor.getWorldQuaternion(this.carrying.object.quaternion);
     }
   }
 
-  private sampleSupport(x: number, z: number): number {
-    let height = 0;
-    for (const surface of this.supports) {
-      if (x >= surface.minX && x <= surface.maxX && z >= surface.minZ && z <= surface.maxZ) {
-        height = Math.max(height, surface.top);
+  /**
+   * What the cat is looking at: the homeowner when they matter, otherwise the
+   * nearest point of interest, otherwise nothing and the head drifts idly.
+   */
+  private resolveLookTarget(position: THREE.Vector3): THREE.Vector3 | null {
+    if (this.ownerState === "pursuing" || this.ownerState === "investigating") {
+      const distance = this.ownerPosition.distanceTo(position);
+      if (distance < 9) {
+        return this.lookTarget.copy(this.ownerPosition).setY(this.owner.eyeHeight);
       }
     }
-    return height;
+    let best: readonly [number, number, number] | null = null;
+    let bestDistance = 3.6;
+    for (const point of POINTS_OF_INTEREST) {
+      const distance = Math.hypot(point[0] - position.x, point[2] - position.z);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = point;
+      }
+    }
+    return best ? this.lookTarget.set(best[0], best[1], best[2]) : null;
+  }
+
+  private updatePresentation(_dt: number): void {
+    if (this.zoneLabelTimer <= 0) this.cameraLabelElement.classList.remove("visible");
+    if (this.toastTimer <= 0) this.toastElement.classList.remove("visible");
+
+    const prompt = this.buildPrompt();
+    if (prompt !== this.currentPrompt) {
+      this.currentPrompt = prompt;
+      this.promptElement.textContent = prompt;
+      this.promptElement.classList.toggle("visible", prompt.length > 0 && this.started && !this.completed);
+    }
+  }
+
+  private buildPrompt(): string {
+    if (!this.started || this.completed) return "";
+    const action = this.inputMethod === "gamepad" ? "A" : "E";
+    const jump = this.inputMethod === "gamepad" ? "B" : "SPACE";
+
+    const jumpTarget = this.controller.availableJumpTarget();
+    const choice = resolveInteraction(this.buildInteractionCandidates());
+    if (choice) {
+      const [kind, key = ""] = choice.id.split(":");
+      if (kind === "drop") return `${action} — drop ${this.carrying?.spec.label ?? "it"}`;
+      if (kind === "carry") {
+        return `${action} — pick up ${this.props.find((prop) => prop.spec.id === key)?.spec.label ?? "it"}`;
+      }
+      if (kind === "swipe") {
+        return `${action} — swipe ${this.props.find((prop) => prop.spec.id === key)?.spec.label ?? "it"}`;
+      }
+      if (kind === "station") {
+        const station = STATIONS.find((candidate) => candidate.id === key);
+        if (station) return `${action} — ${station.prompt}`;
+      }
+    }
+    if (jumpTarget) return `${jump} — leap onto ${jumpTarget.label}`;
+    return "";
+  }
+
+  private updateDebug(frameDelta: number): void {
+    if (!this.debugVisible) return;
+    this.debugLinesAge += frameDelta;
+    if (this.debugLinesAge > 0.25) {
+      this.debugLinesAge = 0;
+      this.refreshDebugLines();
+    }
+    const panel = document.querySelector<HTMLElement>("#debug-panel");
+    if (!panel) return;
+    const state = this.catState;
+    panel.textContent = [
+      `FPS          ${Math.round(this.smoothedFrameRate)}`,
+      `Draw calls   ${this.renderer.info.render.calls}`,
+      `Triangles    ${this.renderer.info.render.triangles}`,
+      `Cat          ${state ? `${state.position.x.toFixed(2)}, ${state.position.y.toFixed(2)}, ${state.position.z.toFixed(2)}` : "—"}`,
+      `Grounded     ${state?.grounded ?? false}  air ${(state?.airborne ?? 0).toFixed(2)}`,
+      `Gait         ${this.catAnimator.currentGait()}  speed ${(state?.planarSpeed ?? 0).toFixed(2)}`,
+      `Jump target  ${this.controller.availableJumpTarget()?.id ?? "—"}`,
+      `Carrying     ${this.carrying?.spec.id ?? "—"}`,
+      `Owner        ${this.ownerState}  suspicion ${Math.round(this.suspicion)}`,
+      `Camera       ${this.director.currentZoneId()}`,
+      `Preparations ${this.preparations.size}`,
+      `Awake bodies ${this.physics.activeBodyCount()}/${this.physics.bodies().length}`,
+      `Catastrophe  ${this.catastrophe ? "triggered" : "pending"}`,
+    ].join("\n");
+  }
+
+  /** Rapier's own collider wireframes, so collision bugs are visible. */
+  private refreshDebugLines(): void {
+    const buffers = this.physics.debugLines();
+    if (!this.debugLines) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(buffers.vertices, 3));
+      geometry.setAttribute("color", new THREE.BufferAttribute(buffers.colors, 4));
+      this.debugLines = new THREE.LineSegments(
+        geometry,
+        new THREE.LineBasicMaterial({ vertexColors: true, depthTest: false, transparent: true, opacity: 0.55 }),
+      );
+      this.debugLines.renderOrder = 20;
+      this.scene.add(this.debugLines);
+      return;
+    }
+    this.debugLines.geometry.setAttribute("position", new THREE.BufferAttribute(buffers.vertices, 3));
+    this.debugLines.geometry.setAttribute("color", new THREE.BufferAttribute(buffers.colors, 4));
+  }
+
+  // -- objectives ------------------------------------------------------------
+
+  private updateObjectives(): void {
+    const position = this.catPosition();
+    if (position.x > -2.8 && !this.isComplete("enter")) {
+      this.completeObjective("enter", "You are inside. The morning is now negotiable.");
+    }
+
+    const prepare = this.objectives.find((objective) => objective.id === "prepare");
+    if (prepare && !prepare.complete) {
+      const count = Math.min(2, this.preparations.size);
+      const text = `Prepare two disasters (${count}/2)`;
+      if (prepare.text !== text) {
+        prepare.text = text;
+        this.renderObjectives();
+      }
+    }
+    if (this.preparations.size >= 2) {
+      this.completeObjective("prepare", "The trap is set. Now find something breakable.");
+    }
+
+    // Optional: sit in the fruit bowl.
+    const bowl = this.props.find((prop) => prop.spec.id === "fruit-bowl");
+    if (bowl && !this.isComplete("fruit")) {
+      bowl.body.position(this.scratchVector);
+      if (Math.hypot(this.scratchVector.x - position.x, this.scratchVector.z - position.z) < 0.55
+        && Math.abs(position.y - this.scratchVector.y) < 0.5) {
+        this.completeObjective("fruit", "The fruit bowl has been improved immeasurably.");
+      }
+    }
+  }
+
+  private isComplete(id: string): boolean {
+    return this.objectives.find((objective) => objective.id === id)?.complete ?? false;
   }
 
   private completeObjective(id: string, toast: string): void {
@@ -698,314 +974,41 @@ export class CatscapadesGame {
   private showToast(message: string): void {
     this.toastElement.textContent = message;
     this.toastElement.classList.add("visible");
-    this.toastTimer = 2.2;
+    this.toastTimer = 2.6;
   }
 
-  private buildLighting(): void {
-    const hemisphere = new THREE.HemisphereLight(0xfff2d2, 0x758b68, 2.1);
-    this.scene.add(hemisphere);
+  // -- setup -----------------------------------------------------------------
 
-    const sun = new THREE.DirectionalLight(0xfff3d2, 3.1);
-    sun.position.set(-8, 15, 9);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(1024, 1024);
-    sun.shadow.camera.left = -20;
-    sun.shadow.camera.right = 20;
-    sun.shadow.camera.top = 16;
-    sun.shadow.camera.bottom = -16;
-    sun.shadow.camera.near = 1;
-    sun.shadow.camera.far = 45;
-    this.scene.add(sun);
-  }
+  private buildProps(): void {
+    for (const spec of PROPS) {
+      const built = instantiateProp(spec.model);
+      built.object.position.set(spec.position[0], spec.position[1], spec.position[2]);
+      built.object.traverse((node) => {
+        if (node instanceof THREE.Mesh) node.castShadow = true;
+      });
+      this.scene.add(built.object);
 
-  private buildLevel(): void {
-    const groundMaterial = new THREE.MeshStandardMaterial({ color: 0xc6b27e, roughness: 1 });
-    const floor = new THREE.Mesh(new THREE.BoxGeometry(29, 0.24, 16), groundMaterial);
-    floor.position.y = -0.13;
-    floor.receiveShadow = true;
-    this.scene.add(floor);
-
-    const gardenFloor = new THREE.Mesh(
-      new THREE.BoxGeometry(10.6, 0.03, 15.4),
-      new THREE.MeshStandardMaterial({ color: 0x9fb27a, roughness: 1 }),
-    );
-    gardenFloor.position.set(-8.45, 0.01, 0);
-    gardenFloor.receiveShadow = true;
-    this.scene.add(gardenFloor);
-
-    const kitchenFloor = new THREE.Mesh(
-      new THREE.BoxGeometry(9.8, 0.035, 15.4),
-      new THREE.MeshStandardMaterial({ color: 0xead8ac, roughness: 1 }),
-    );
-    kitchenFloor.position.set(2, 0.02, 0);
-    kitchenFloor.receiveShadow = true;
-    this.scene.add(kitchenFloor);
-
-    const diningFloor = new THREE.Mesh(
-      new THREE.BoxGeometry(7.1, 0.035, 15.4),
-      new THREE.MeshStandardMaterial({ color: 0xcaa98d, roughness: 1 }),
-    );
-    diningFloor.position.set(10.5, 0.02, 0);
-    diningFloor.receiveShadow = true;
-    this.scene.add(diningFloor);
-
-    this.addWall(-3, -4.8, 0.35, 6.2);
-    this.addWall(-3, 4.8, 0.35, 6.2);
-    this.addWall(7, -5.3, 0.35, 5.2);
-    this.addWall(7, 4.1, 0.35, 7.4);
-
-    this.addFurniture(new THREE.Vector3(2.2, 0.58, 1.8), new THREE.Vector3(4.1, 1.15, 2.25), 0x8d6d4f, true);
-    this.supports.push({ minX: 0.15, maxX: 4.25, minZ: 0.68, maxZ: 2.93, top: 1.16 });
-    this.colliders.push({ minX: 0.5, maxX: 3.9, minZ: 0.95, maxZ: 2.65 });
-
-    this.addFurniture(new THREE.Vector3(4.7, 0.67, -5.35), new THREE.Vector3(4.2, 1.34, 1.5), 0x81978a, true);
-    this.supports.push({ minX: 2.6, maxX: 6.8, minZ: -6.1, maxZ: -4.6, top: 1.35 });
-    this.colliders.push({ minX: 2.8, maxX: 6.65, minZ: -5.95, maxZ: -4.75 });
-
-    this.addFurniture(new THREE.Vector3(10.5, 0.58, 2.1), new THREE.Vector3(4.5, 1.15, 2.4), 0x785d47, true);
-    this.supports.push({ minX: 8.25, maxX: 12.75, minZ: 0.9, maxZ: 3.3, top: 1.16 });
-    this.colliders.push({ minX: 8.55, maxX: 12.45, minZ: 1.15, maxZ: 3.05 });
-
-    this.addFurniture(new THREE.Vector3(8.4, 0.45, -4.1), new THREE.Vector3(1.5, 0.9, 1.5), 0x9b7b61, true);
-    this.colliders.push({ minX: 7.72, maxX: 9.08, minZ: -4.78, maxZ: -3.42 });
-
-    this.addCardboardBox();
-    this.addPlants();
-    this.addProp("red-mug", new THREE.Vector3(3.25, 1.48, 1.58), 0xd64e3b, 0.24);
-    this.addProp("blue-cup", new THREE.Vector3(1.36, 1.45, 2.15), 0x4c7d91, 0.22);
-    this.addProp("fruit-bowl", new THREE.Vector3(10.3, 1.45, 2.1), 0xe5b84f, 0.34);
-
-    this.keyMesh.position.set(5.3, 1.51, -5.05);
-    this.keyMesh.visible = true;
-    this.scene.add(this.keyMesh);
-    this.carryItems.push({ id: "key", label: "brass key", mesh: this.keyMesh, home: this.keyMesh.position.clone() });
-    this.addCarryItem("sock", "striped sock", new THREE.Vector3(8.2, .22, -5.6), 0x8c5f87);
-    this.addCarryItem("sponge", "sponge", new THREE.Vector3(5.8, .25, -4.15), 0xe5c449);
-    this.addCarryItem("snack", "breakfast sausage", new THREE.Vector3(10.8, 1.42, 1.8), 0x9e5038);
-    this.addCarryItem("toy", "mouse toy", new THREE.Vector3(-8.1, .22, -1.9), 0x738b91);
-
-    this.addDisasterProps();
-
-    this.addDoorFrame(-3, 0);
-    this.addDoorFrame(7, -1.1);
-  }
-
-  private buildCat(): void {
-    const fur = new THREE.MeshStandardMaterial({ color: 0x3e3a35, roughness: 0.92 });
-    const cream = new THREE.MeshStandardMaterial({ color: 0xe7ddc4, roughness: 0.95 });
-    const eye = new THREE.MeshStandardMaterial({ color: 0xc9d95f, roughness: 0.5 });
-
-    const body = new THREE.Mesh(new THREE.SphereGeometry(0.52, 18, 12), fur);
-    body.scale.set(1.25, 0.78, 1.55);
-    body.castShadow = true;
-    this.catVisual.add(body);
-
-    const chest = new THREE.Mesh(new THREE.SphereGeometry(0.33, 16, 10), cream);
-    chest.scale.set(0.85, 0.85, 0.45);
-    chest.position.set(0, -0.03, 0.57);
-    this.catVisual.add(chest);
-
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.39, 18, 12), fur);
-    head.position.set(0, 0.17, 0.69);
-    head.scale.set(1, 0.93, 0.92);
-    head.castShadow = true;
-    this.catVisual.add(head);
-
-    const earGeometry = new THREE.ConeGeometry(0.18, 0.36, 3);
-    for (const side of [-1, 1]) {
-      const ear = new THREE.Mesh(earGeometry, fur);
-      ear.position.set(side * 0.23, 0.52, 0.7);
-      ear.rotation.z = side * -0.16;
-      ear.rotation.x = -0.05;
-      this.catVisual.add(ear);
-
-      const catEye = new THREE.Mesh(new THREE.SphereGeometry(0.055, 10, 8), eye);
-      catEye.scale.set(1.0, 1.35, 0.45);
-      catEye.position.set(side * 0.145, 0.22, 1.03);
-      this.catVisual.add(catEye);
-    }
-
-    const pawGeometry = new THREE.CapsuleGeometry(0.12, 0.36, 4, 8);
-    for (const [name, x, z] of [
-      ["left-paw", -0.31, 0.46],
-      ["right-paw", 0.31, 0.46],
-      ["back-left", -0.32, -0.48],
-      ["back-right", 0.32, -0.48],
-    ] as const) {
-      const paw = new THREE.Mesh(pawGeometry, fur);
-      paw.name = name;
-      paw.position.set(x, -0.42, z);
-      paw.rotation.z = Math.PI;
-      paw.castShadow = true;
-      this.catVisual.add(paw);
-    }
-
-    const tailSegment = new THREE.Mesh(new THREE.CapsuleGeometry(0.105, 1.0, 5, 10), fur);
-    tailSegment.position.y = 0.56;
-    tailSegment.rotation.x = Math.PI / 2;
-    this.catTail.position.set(0, 0.04, -0.72);
-    this.catTail.add(tailSegment);
-    this.catVisual.add(this.catTail);
-
-    const mouthAnchor = new THREE.Object3D();
-    mouthAnchor.name = "mouth-anchor";
-    mouthAnchor.position.set(0, 0.1, 1.1);
-    this.catVisual.add(mouthAnchor);
-
-    this.catVisual.position.y = 0.54;
-    this.cat.add(this.catVisual);
-    this.cat.position.copy(this.catPosition);
-    this.scene.add(this.cat);
-  }
-
-  private buildOwner(): void {
-    const clothes = new THREE.MeshStandardMaterial({ color: 0x567a78, roughness: 0.95 });
-    const skin = new THREE.MeshStandardMaterial({ color: 0xc88f6b, roughness: 0.92 });
-    const hair = new THREE.MeshStandardMaterial({ color: 0x44362d, roughness: 1 });
-
-    const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.38, 1.05, 6, 12), clothes);
-    body.position.y = 1.15;
-    body.castShadow = true;
-    this.owner.add(body);
-
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.32, 16, 12), skin);
-    head.position.y = 2.08;
-    head.castShadow = true;
-    this.owner.add(head);
-
-    const hairCap = new THREE.Mesh(new THREE.SphereGeometry(0.33, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2), hair);
-    hairCap.position.y = 2.16;
-    this.owner.add(hairCap);
-
-    this.ownerAlert.position.set(0, 2.75, 0);
-    this.ownerAlert.visible = false;
-    this.owner.add(this.ownerAlert);
-
-    this.owner.position.copy(this.ownerRoutine[0]!);
-    this.scene.add(this.owner);
-  }
-
-  private addWall(x: number, z: number, width: number, depth: number): void {
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(width, 3.4, depth),
-      new THREE.MeshStandardMaterial({ color: 0xf1e3bd, roughness: 1 }),
-    );
-    mesh.position.set(x, 1.7, z);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    this.scene.add(mesh);
-    this.colliders.push({ minX: x - width / 2, maxX: x + width / 2, minZ: z - depth / 2, maxZ: z + depth / 2 });
-  }
-
-  private addDoorFrame(x: number, z: number): void {
-    const material = new THREE.MeshStandardMaterial({ color: 0x745c48, roughness: 1 });
-    for (const dz of [-1.72, 1.72]) {
-      const side = new THREE.Mesh(new THREE.BoxGeometry(0.5, 3.8, 0.3), material);
-      side.position.set(x, 1.9, z + dz);
-      side.castShadow = true;
-      this.scene.add(side);
-    }
-    const top = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.35, 3.75), material);
-    top.position.set(x, 3.65, z);
-    top.castShadow = true;
-    this.scene.add(top);
-  }
-
-  private addFurniture(position: THREE.Vector3, size: THREE.Vector3, color: number, castShadow: boolean): void {
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(size.x, size.y, size.z),
-      new THREE.MeshStandardMaterial({ color, roughness: 0.95 }),
-    );
-    mesh.position.copy(position);
-    mesh.castShadow = castShadow;
-    mesh.receiveShadow = true;
-    this.scene.add(mesh);
-  }
-
-  private addCardboardBox(): void {
-    const material = new THREE.MeshStandardMaterial({ color: 0xa97945, roughness: 1 });
-    const bottom = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.18, 1.8), material);
-    bottom.position.copy(this.boxPosition).add(new THREE.Vector3(0, 0.09, 0));
-    bottom.receiveShadow = true;
-    this.scene.add(bottom);
-    for (const [x, z, w, d] of [
-      [-1.12, 0, 0.16, 1.8], [1.12, 0, 0.16, 1.8], [0, -0.82, 2.4, 0.16], [0, 0.82, 2.4, 0.16],
-    ] as const) {
-      const wall = new THREE.Mesh(new THREE.BoxGeometry(w, 0.52, d), material);
-      wall.position.set(this.boxPosition.x + x, 0.26, this.boxPosition.z + z);
-      wall.castShadow = true;
-      this.scene.add(wall);
+      const body = this.physics.addDynamicBody({
+        id: spec.id,
+        shape: built.shape,
+        position: new THREE.Vector3(spec.position[0], spec.position[1], spec.position[2]),
+        mass: built.mass,
+        restitution: spec.fragile ? 0.1 : 0.22,
+      });
+      this.props.push({
+        spec,
+        object: built.object,
+        body,
+        restOffset: built.restOffset,
+        mass: built.mass,
+        broken: false,
+        settledHeight: spec.position[1],
+      });
     }
   }
 
-  private addPlants(): void {
-    const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x8d6347, roughness: 1 });
-    const leafMaterial = new THREE.MeshStandardMaterial({ color: 0x54734d, roughness: 1 });
-    for (const [x, z, scale] of [[-12.5, -5.4, 1], [-7.4, -6.2, 0.8], [-11.9, 0.3, 0.65]] as const) {
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12 * scale, 0.16 * scale, 1.5 * scale, 7), trunkMaterial);
-      trunk.position.set(x, 0.75 * scale, z);
-      trunk.castShadow = true;
-      this.scene.add(trunk);
-      const leaves = new THREE.Mesh(new THREE.DodecahedronGeometry(0.75 * scale, 0), leafMaterial);
-      leaves.position.set(x, 1.65 * scale, z);
-      leaves.castShadow = true;
-      this.scene.add(leaves);
-    }
-  }
-
-  private addProp(id: string, position: THREE.Vector3, color: number, radius: number): void {
-    const group = new THREE.Group();
-    const material = new THREE.MeshStandardMaterial({ color, roughness: 0.72 });
-    const body = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.83, radius, radius * 1.8, 14), material);
-    body.castShadow = true;
-    group.add(body);
-    if (id.includes("mug") || id.includes("cup")) {
-      const handle = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.56, radius * 0.15, 7, 12), material);
-      handle.rotation.y = Math.PI / 2;
-      handle.position.x = radius * 0.9;
-      group.add(handle);
-    }
-    group.position.copy(position);
-    this.scene.add(group);
-    this.props.push({ id, mesh: group, velocity: new THREE.Vector3(), radius, disturbed: false, settled: false, crashPlayed: false });
-  }
-
-  private addCarryItem(id: string, label: string, position: THREE.Vector3, color: number): void {
-    const mesh = new THREE.Mesh(new THREE.CapsuleGeometry(.11, .35, 4, 8), new THREE.MeshStandardMaterial({ color, roughness: .85 }));
-    mesh.position.copy(position); mesh.rotation.z = Math.PI / 2; mesh.castShadow = true; this.scene.add(mesh);
-    this.carryItems.push({ id, label, mesh, home: position.clone() });
-  }
-
-  private addDisasterProps(): void {
-    this.sinkWater = new THREE.Mesh(new THREE.BoxGeometry(1.35, .04, .72), new THREE.MeshStandardMaterial({ color: 0x58a9c5, emissive: 0x17495a, roughness: .25 }));
-    this.sinkWater.position.set(4.7, 1.38, -5.3); this.sinkWater.visible = false; this.scene.add(this.sinkWater);
-    this.flourBag = new THREE.Mesh(new THREE.BoxGeometry(.6, .82, .38), new THREE.MeshStandardMaterial({ color: 0xf5edda, roughness: 1 }));
-    this.flourBag.position.set(1.2, .42, -4.4); this.flourBag.rotation.y = .18; this.flourBag.castShadow = true; this.scene.add(this.flourBag);
-    this.cupboardDoor = new THREE.Mesh(new THREE.BoxGeometry(.08, 1.15, 1.1), new THREE.MeshStandardMaterial({ color: 0xa36f47, roughness: .9 }));
-    this.cupboardDoor.position.set(6.1, .8, -3.65); this.cupboardDoor.geometry.translate(0, 0, -.55); this.cupboardDoor.castShadow = true; this.scene.add(this.cupboardDoor);
-  }
-
-  private updateDebug(frameDelta: number): void {
-    if (!this.debugVisible) return;
-    const panel = document.querySelector<HTMLElement>("#debug-panel");
-    if (!panel) return;
-    panel.textContent = `FPS ${Math.round(1 / Math.max(frameDelta, .001))}\nDraw calls ${this.renderer.info.render.calls}\nTriangles ${this.renderer.info.render.triangles}\nPlayer ${this.catPosition.x.toFixed(2)}, ${this.catPosition.z.toFixed(2)}\nState ${this.carryingItem ? `carrying ${this.carryingItem.id}` : "free"}\nNPC ${this.ownerState}\nCamera ${this.currentZone}\nPreparations ${this.preparations.size}/2\nCatastrophe ${this.catastrophe ? "ready" : "pending"}`;
-  }
-
-  private createKey(): THREE.Group {
-    const group = new THREE.Group();
-    const material = new THREE.MeshStandardMaterial({ color: 0xd7ae48, metalness: 0.45, roughness: 0.38 });
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.055, 8, 18), material);
-    ring.rotation.x = Math.PI / 2;
-    group.add(ring);
-    const stem = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.06, 0.42), material);
-    stem.position.z = -0.28;
-    group.add(stem);
-    const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.06, 0.08), material);
-    tooth.position.set(0.055, 0, -0.47);
-    group.add(tooth);
-    group.scale.setScalar(0.8);
-    return group;
+  private catPosition(): THREE.Vector3 {
+    return this.catState?.position ?? SPAWN.cat;
   }
 
   private resize(): void {
@@ -1019,17 +1022,30 @@ export class CatscapadesGame {
   }
 }
 
-function damp(current: number, target: number, rate: number, dt: number): number {
-  return THREE.MathUtils.lerp(current, target, 1 - Math.exp(-rate * dt));
+function instantiateProp(model: PropSpec["model"]): BuiltProp {
+  switch (model) {
+    case "mug": return buildMug();
+    case "fruit-bowl": return buildFruitBowl();
+    case "key": return buildKey();
+    case "sock": return buildSock();
+    case "sponge": return buildSponge();
+    case "sausage": return buildSausage();
+    case "mouse-toy": return buildMouseToy();
+    case "kettle": return buildKettle();
+    case "book": return buildBook();
+  }
 }
 
-function dampAngle(current: number, target: number, rate: number, dt: number): number {
-  let delta = (target - current + Math.PI) % (Math.PI * 2) - Math.PI;
-  if (delta < -Math.PI) delta += Math.PI * 2;
-  return current + delta * (1 - Math.exp(-rate * dt));
+/** How aligned the cat's facing is with a target, in [0,1]. */
+function facingScore(from: THREE.Vector3, facing: number, to: THREE.Vector3): number {
+  const dx = to.x - from.x;
+  const dz = to.z - from.z;
+  const length = Math.hypot(dx, dz);
+  if (length < 1e-4) return 1;
+  return clamp((Math.sin(facing) * dx + Math.cos(facing) * dz) / length, 0, 1);
 }
 
-function deadZoneOffset(value: number, deadZone: number): number {
-  if (Math.abs(value) <= deadZone) return 0;
-  return Math.sign(value) * (Math.abs(value) - deadZone);
+/** Later sub-steps in the same frame must not replay one-shot button presses. */
+function consumeEdges(input: InputFrame): InputFrame {
+  return { ...input, actionPressed: false, meowPressed: false, pouncePressed: false };
 }

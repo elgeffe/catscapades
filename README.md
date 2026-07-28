@@ -4,15 +4,17 @@ A desktop browser stealth-comedy MVP about an extremely innocent cat. Observe a 
 
 ## Included
 
-- Camera-relative cat movement
-- Three authored semi-fixed camera zones with dead zones, soft follow, blending and doorway hysteresis
-- Custom TypeScript circle-vs-AABB collision (no physics dependency)
-- Contextual paw actions, five carryable item types, and three disaster preparations
-- Contextual leap, stalking, scampering, and synthesized meow stimuli
-- One homeowner with routine, investigation, pursuit and forgiving catch/reset behavior
+- A fully rigged cat with procedural animation: a spine chain, digitigrade two-bone IK legs, four gaits (creep, walk, trot, gallop) with blended transitions, a verlet-simulated tail, gaze-stabilised head, ears, blinking, and pose states for stalking, carrying, sitting, and pretending to be asleep
+- Rapier 3D physics: a kinematic character controller for the cat and homeowner, dynamic rigid bodies for every swipeable prop, and real vertical traversal
+- Contextual leaps onto authored ledges — chair to table, floor to worktop to wall shelf, planter, box, sideboard, washing machine — plus a forward ledge probe so unauthored geometry is climbable too
+- Three authored semi-fixed camera zones with dead zones, look-ahead, FOV blending, separated movement-basis blending, and doorway hysteresis
+- A three-room house built from typed level data: kitchen, breakfast room, utility nook and garden, with procedural wood, tile, grass and plaster surfaces
+- Contextual paw actions, five carryable item types, and escalating disaster states (running sink → pooling → overflow, punctured flour, opened cupboard, broken crockery)
+- One homeowner with a morning routine, stimulus investigation, suspicion, pursuit and forgiving catch/reset behaviour
 - Six-stage objective chain, multi-condition finale, and four optional challenges
+- A standalone model viewer plus headless model inspection and screenshot tooling
 - Desktop keyboard and standard gamepad controls
-- Pause/settings menu, graphics mode, volume controls, local persistence, and developer diagnostics
+- Pause/settings menu, graphics mode, volume controls, local persistence, and developer diagnostics including Rapier collider wireframes
 - Procedural primitive art; no external assets
 - Relative Vite base path, suitable for GitHub Pages builds
 
@@ -43,7 +45,7 @@ The built static site is written to `dist/`.
 | Ctrl | Stalk |
 | E | Contextual paw / swipe / steal / act innocent |
 | Q | Meow and create a sound stimulus |
-| Space | Contextual leap |
+| Space | Contextual leap — leaps onto the named ledge when one is offered |
 | Escape | Pause/settings |
 | Backquote | Developer diagnostics |
 
@@ -95,3 +97,72 @@ The Vite configuration uses a relative base path and `.github/workflows/deploy.y
 This deliberately uses a tiny hand-rolled collision layer rather than Rapier. It is appropriate for this controlled grey-box: static axis-aligned walls and furniture, planar cat movement, and a few scripted dynamic props. A production level with arbitrary meshes, stairs, moving platforms, and many interacting rigid bodies is where a dedicated physics/query layer becomes more attractive.
 
 The camera is authored by zone. Each zone provides a fixed composition, a target dead zone, soft follow factors and transition thresholds. Movement is calculated from the camera's current projected forward/right basis, so it remains continuous during camera blends.
+
+## Architecture
+
+| Area | Module |
+|---|---|
+| Bootstrap, loop, settings | `src/main.ts`, `src/settings.ts`, `src/input.ts` |
+| Orchestration | `src/game.ts` |
+| Physics | `src/physics/physics-world.ts` (Rapier world, character controller, dynamic bodies, ledge probe) |
+| Cat locomotion | `src/cat/cat-controller.ts` |
+| Animation | `src/anim/cat-animator.ts`, `src/anim/leg-ik.ts`, `src/anim/owner-animator.ts` |
+| Camera | `src/camera/camera-director.ts` |
+| Models | `src/models/` — `cat.ts`, `owner.ts`, `furniture.ts`, `props.ts`, `materials.ts`, `registry.ts`, `inspect.ts` |
+| Level | `src/level/level-data.ts` (authored data), `src/level/level-builder.ts` (scene + colliders) |
+| Rendering-independent rules | `src/core/` — `gameplay.ts`, `level-model.ts`, `math.ts` |
+| Model viewer | `viewer.html`, `src/viewer/` |
+
+Visuals and collision come from one source: each furniture builder returns its own
+collision boxes, so a piece can never be visible-but-not-solid. Level geometry,
+camera framing, jump targets, interaction stations, and the homeowner's routine are
+typed data in `src/level/level-data.ts` rather than being embedded in controllers.
+
+### Physics
+
+Rapier replaced the original hand-rolled circle-vs-AABB collision layer. The MVP
+needs the cat to climb onto counters, chairs, boxes and tables; the previous solver
+was a set of 2D rectangles with no notion of "on top of", so vertical traversal
+could only ever be faked with proximity flags. Rapier supplies grounded checks,
+auto-step, ground snapping and slide-along-wall, and makes swiped crockery behave
+without per-object code.
+
+Locomotion feel stays authored. The cat and homeowner are kinematic; only props are
+dynamic, capped in number, and allowed to sleep. Contextual leaps follow an authored
+arc to a known landing point rather than a ballistic trajectory, because a ballistic
+arc has to clear the lip of a surface using horizontal speed the cat usually does not
+have when taking off pressed against a cupboard face.
+
+## Model viewer and inspection
+
+Every visual asset is registered in `src/models/registry.ts` and can be built,
+measured, animated and screenshotted in isolation.
+
+```bash
+npm run models                  # list every registered model
+npm run models -- cat --clips   # bounds, geometry, joint tree, per-clip motion
+npm run models -- --all         # audit everything; exits non-zero on warnings
+npm run models:capture -- cat   # screenshots from hero/front/side/top
+npm run dev                     # then open /viewer.html for interactive review
+```
+
+`scripts/capture-game.mjs` photographs the running game, and can drop the cat
+anywhere in the level and drive the simulation deterministically:
+
+```bash
+node scripts/capture-game.mjs --at 5.3,-5.0 --drive "w:0.6,jump:0.3,idle:0.5"
+```
+
+See `.agents/skills/catscapades-model-viewer/SKILL.md` for the full workflow.
+
+## Known limitations
+
+- Audio is synthesized rather than authored, and there are no subtitles yet.
+- The homeowner navigates by direct steering with collision, not a route graph, so
+  dense furniture can briefly snag pursuit.
+- The production JavaScript chunk exceeds Vite's 500 kB warning threshold now that
+  Rapier is bundled. Load performance is within the desktop target; splitting the
+  viewer and debug modules is the next step if it grows.
+- Headless Chromium renders through SwiftShader at single-digit frame rates, so the
+  capture tooling should use `--drive` rather than real key presses for anything
+  timing-sensitive.

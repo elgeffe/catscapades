@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Catscapades — Model Viewer</title>
+  </head>
+  <body class="viewer-body">
+    <div id="viewer-app">
+      <canvas id="viewer-canvas"></canvas>
+
+      <aside id="viewer-sidebar" class="viewer-panel">
+        <h1>MODEL VIEWER</h1>
+        <input id="viewer-search" type="search" placeholder="Filter models…" autocomplete="off" />
+        <div id="viewer-list" class="viewer-list"></div>
+      </aside>
+
+      <section id="viewer-inspector" class="viewer-panel viewer-inspector">
+        <h2 id="viewer-title">—</h2>
+        <p id="viewer-description" class="viewer-description"></p>
+
+        <div class="viewer-controls">
+          <label>Clip
+            <select id="viewer-clip"></select>
+          </label>
+          <label>View
+            <select id="viewer-view">
+              <option value="hero">Hero (3/4)</option>
+              <option value="front">Front</option>
+              <option value="side">Side</option>
+              <option value="back">Back</option>
+              <option value="top">Top</option>
+              <option value="turntable">Turntable</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="viewer-toggles">
+          <label><input id="viewer-grid" type="checkbox" checked /> Grid</label>
+          <label><input id="viewer-bounds" type="checkbox" /> Bounds</label>
+          <label><input id="viewer-joints" type="checkbox" /> Joints</label>
+          <label><input id="viewer-wireframe" type="checkbox" /> Wireframe</label>
+          <label><input id="viewer-dark" type="checkbox" /> Dark</label>
+          <label><input id="viewer-paused" type="checkbox" /> Pause</label>
+        </div>
+
+        <pre id="viewer-report" class="viewer-report"></pre>
+      </section>
+
+      <div id="viewer-hint" class="viewer-hint">Drag to orbit · scroll to zoom · arrow keys to step frames</div>
+    </div>
+    <script type="module" src="/src/viewer/viewer.ts"></script>
+  </body>
+</html>

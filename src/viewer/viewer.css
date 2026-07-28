@@ -1,0 +1,194 @@
+/* Model viewer chrome. Deliberately plain: the model is the subject. */
+
+.viewer-body {
+  margin: 0;
+  overflow: hidden;
+  background: #e9e4d8;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  color: #2c2a26;
+}
+
+#viewer-app {
+  position: fixed;
+  inset: 0;
+}
+
+#viewer-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.viewer-panel {
+  position: absolute;
+  background: rgba(252, 250, 245, 0.94);
+  border: 1px solid rgba(70, 64, 54, 0.18);
+  border-radius: 10px;
+  box-shadow: 0 12px 30px rgba(40, 34, 24, 0.14);
+  backdrop-filter: blur(6px);
+  padding: 14px 16px;
+}
+
+#viewer-sidebar {
+  top: 16px;
+  left: 16px;
+  bottom: 16px;
+  width: 236px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+
+#viewer-sidebar h1 {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  color: #7b7161;
+}
+
+#viewer-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid rgba(70, 64, 54, 0.24);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.viewer-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.viewer-group h3 {
+  margin: 0 0 4px;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #9c917d;
+}
+
+.viewer-list button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #38342d;
+  cursor: pointer;
+}
+
+.viewer-list button:hover {
+  background: rgba(80, 110, 90, 0.12);
+}
+
+.viewer-list button.active {
+  background: #4d6b52;
+  color: #fdfbf4;
+}
+
+.viewer-inspector {
+  top: 16px;
+  right: 16px;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.viewer-inspector h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.viewer-description {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #6d6455;
+}
+
+.viewer-controls {
+  display: flex;
+  gap: 10px;
+}
+
+.viewer-controls label {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #9c917d;
+}
+
+.viewer-controls select {
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 6px;
+  border: 1px solid rgba(70, 64, 54, 0.24);
+  border-radius: 5px;
+  background: #fff;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #2c2a26;
+}
+
+.viewer-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12px;
+  color: #4b463c;
+}
+
+.viewer-toggles label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.viewer-report {
+  margin: 0;
+  padding: 9px 10px;
+  border-radius: 6px;
+  background: rgba(45, 42, 35, 0.06);
+  font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.viewer-hint {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: rgba(60, 55, 45, 0.6);
+  pointer-events: none;
+}
+
+/* Capture mode: hide every panel so screenshots contain only the model.
+   The panels are id-selected above, so these rules must match that specificity. */
+.viewer-chrome-hidden #viewer-sidebar,
+.viewer-chrome-hidden #viewer-inspector,
+.viewer-chrome-hidden #viewer-hint {
+  display: none;
+}
