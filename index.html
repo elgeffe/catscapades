@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#ddcda9" />
+    <title>Cat Schemer — Grey-box Prototype</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game" aria-label="Cat Schemer game canvas"></canvas>
+
+      <header class="title-card">
+        <div class="eyebrow">GREY-BOX PROTOTYPE</div>
+        <h1>CAT SCHEMER</h1>
+        <p>Ruin breakfast. Steal the key. Look innocent.</p>
+      </header>
+
+      <aside id="objectives" class="objectives" aria-live="polite"></aside>
+      <div id="camera-label" class="camera-label">THE GARDEN</div>
+      <div id="prompt" class="prompt"></div>
+      <div id="toast" class="toast" aria-live="assertive"></div>
+
+      <div class="desktop-help">
+        <span><kbd>WASD</kbd> move</span>
+        <span><kbd>Shift</kbd> scamper</span>
+        <span><kbd>E</kbd> interact / swipe</span>
+        <span><kbd>Q</kbd> meow</span>
+        <span><kbd>Space</kbd> pounce</span>
+      </div>
+
+      <div id="touch-controls" class="touch-controls" aria-label="Touch controls">
+        <div id="joystick" class="joystick" aria-label="Movement joystick">
+          <div id="joystick-knob" class="joystick-knob"></div>
+        </div>
+        <div class="action-cluster">
+          <button id="btn-meow" class="round-button secondary" type="button">MEOW</button>
+          <button id="btn-pounce" class="round-button secondary" type="button">POUNCE</button>
+          <button id="btn-action" class="round-button primary" type="button">PAW</button>
+        </div>
+      </div>
+
+      <div id="rotate-hint" class="rotate-hint">
+        <div class="rotate-icon">↻</div>
+        <strong>Rotate your device</strong>
+        <span>This prototype is composed for landscape play.</span>
+      </div>
+
+      <div id="start-screen" class="modal visible">
+        <div class="modal-panel">
+          <div class="cat-mark">ฅ^•ﻌ•^ฅ</div>
+          <div class="eyebrow">A TINY MISCHIEF VERTICAL SLICE</div>
+          <h2>Breakfast is far too peaceful.</h2>
+          <p>Use noise and destruction to distract the owner, steal the brass key, then return to your box and act completely innocent.</p>
+          <button id="start-button" type="button">BEGIN SCHEMING</button>
+          <small>Desktop keyboard and mobile touch controls are both supported.</small>
+        </div>
+      </div>
+
+      <div id="success-screen" class="modal">
+        <div class="modal-panel success-panel">
+          <div class="cat-mark">=^._.^=</div>
+          <div class="eyebrow">SCHEME COMPLETE</div>
+          <h2>A flawless crime.</h2>
+          <p>The kitchen is ruined, the key is missing, and the cat is asleep. No reasonable person could connect these events.</p>
+          <button id="restart-button" type="button">SCHEME AGAIN</button>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
