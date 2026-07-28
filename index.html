@@ -4,15 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#ddcda9" />
-    <title>Cat Schemer — Grey-box Prototype</title>
+    <title>Catscapades — A Perfectly Quiet Morning</title>
   </head>
   <body>
     <div id="app">
-      <canvas id="game" aria-label="Cat Schemer game canvas"></canvas>
+      <canvas id="game" aria-label="Catscapades game canvas"></canvas>
 
       <header class="title-card">
-        <div class="eyebrow">GREY-BOX PROTOTYPE</div>
-        <h1>CAT SCHEMER</h1>
+        <div class="eyebrow">A PERFECTLY QUIET MORNING</div>
+        <h1>CATSCAPADES</h1>
         <p>Ruin breakfast. Steal the key. Look innocent.</p>
       </header>
 
@@ -26,34 +26,33 @@
         <span><kbd>Shift</kbd> scamper</span>
         <span><kbd>E</kbd> interact / swipe</span>
         <span><kbd>Q</kbd> meow</span>
-        <span><kbd>Space</kbd> pounce</span>
+        <span><kbd>Space</kbd> jump</span>
+        <span><kbd>Ctrl</kbd> stalk</span>
+        <span><kbd>Esc</kbd> pause</span>
       </div>
-
-      <div id="touch-controls" class="touch-controls" aria-label="Touch controls">
-        <div id="joystick" class="joystick" aria-label="Movement joystick">
-          <div id="joystick-knob" class="joystick-knob"></div>
-        </div>
-        <div class="action-cluster">
-          <button id="btn-meow" class="round-button secondary" type="button">MEOW</button>
-          <button id="btn-pounce" class="round-button secondary" type="button">POUNCE</button>
-          <button id="btn-action" class="round-button primary" type="button">PAW</button>
-        </div>
-      </div>
-
-      <div id="rotate-hint" class="rotate-hint">
-        <div class="rotate-icon">↻</div>
-        <strong>Rotate your device</strong>
-        <span>This prototype is composed for landscape play.</span>
-      </div>
+      <div id="subtitle" class="subtitle" aria-live="polite"></div>
+      <pre id="debug-panel" class="debug-panel"></pre>
 
       <div id="start-screen" class="modal visible">
         <div class="modal-panel">
           <div class="cat-mark">ฅ^•ﻌ•^ฅ</div>
-          <div class="eyebrow">A TINY MISCHIEF VERTICAL SLICE</div>
+          <div class="eyebrow">A DESKTOP STEALTH-COMEDY</div>
           <h2>Breakfast is far too peaceful.</h2>
           <p>Use noise and destruction to distract the owner, steal the brass key, then return to your box and act completely innocent.</p>
           <button id="start-button" type="button">BEGIN SCHEMING</button>
-          <small>Desktop keyboard and mobile touch controls are both supported.</small>
+          <small>Keyboard and standard gamepads supported.</small>
+        </div>
+      </div>
+
+      <div id="pause-screen" class="modal">
+        <div class="modal-panel settings-panel">
+          <div class="eyebrow">PAUSED</div><h2>Plot at your leisure.</h2>
+          <label>Master volume <input id="master-volume" type="range" min="0" max="1" step="0.05" value="0.8"></label>
+          <label>Effects volume <input id="effects-volume" type="range" min="0" max="1" step="0.05" value="0.8"></label>
+          <label>Graphics <select id="graphics-quality"><option value="high">High</option><option value="low">Low</option></select></label>
+          <label><input id="reduced-motion" type="checkbox"> Reduced camera motion</label>
+          <label><input id="high-contrast" type="checkbox"> High-contrast prompts</label>
+          <div class="button-row"><button id="resume-button">RESUME</button><button id="pause-restart-button">RESTART</button></div>
         </div>
       </div>
 

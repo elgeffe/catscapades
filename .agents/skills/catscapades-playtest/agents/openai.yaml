@@ -1,0 +1,4 @@
+interface:
+  display_name: "Catscapades Playtest"
+  short_description: "Run event-driven playtests and diagnose level progression"
+  default_prompt: "Use $catscapades-playtest to programmatically play the current level, identify objective deadlocks or pacing problems, and validate the resulting changes."

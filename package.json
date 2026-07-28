@@ -1,5 +1,5 @@
 {
-  "name": "cat-schemer-prototype",
+  "name": "catscapades",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "playtest": "vite-node scripts/playtest.ts"
   },
   "dependencies": {
     "three": "^0.179.1"
@@ -15,6 +17,7 @@
   "devDependencies": {
     "@types/three": "^0.179.0",
     "typescript": "^5.8.3",
-    "vite": "^7.0.6"
+    "vite": "^7.0.6",
+    "vitest": "^3.2.4"
   }
 }
