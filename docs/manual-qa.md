@@ -10,5 +10,10 @@
 - [ ] Pause/restart, hide/resume the tab, reload, and verify saved settings.
 - [ ] Verify audio unlock, the quiet music loop, all three volume sliders, and music fades on pause/resume.
 - [ ] Verify low graphics, reduced camera motion, and high-contrast prompts.
-- [ ] Toggle diagnostics with backquote and inspect coordinates, NPC state, camera zone, and render statistics.
+- [ ] Stand directly behind the homeowner while they work at the sink and confirm they do not notice you.
+- [ ] Cross their vision cone at range and up close, and confirm suspicion climbs faster for the closer, more central look.
+- [ ] Crouch behind the counter run, then climb onto the worktop, and confirm only the second one gets you seen.
+- [ ] Get spotted, break line of sight, and confirm they walk to where you *were*, sweep it, and give up rather than tracking you through the furniture.
+- [ ] Hold still while being hunted, and confirm stillness and the cardboard box both make you harder to see.
+- [ ] Toggle diagnostics with backquote and inspect coordinates, NPC state, camera zone, the vision cone, and render statistics.
 - [ ] Preview `dist/` and smoke-test the deployed GitHub Pages URL and reload.

@@ -7,6 +7,10 @@ import {
   isCatastropheReady, OBJECTIVE_DEFINITIONS, OPTIONAL_OBJECTIVE_DEFINITIONS,
 } from "./core/level-model";
 import { clamp, damp, dampAngle, smoothstep } from "./core/math";
+import {
+  OWNER_SIGHT, evaluateSight, rangeAtAngle, searchPattern,
+  type SearchPoint, type SightResult,
+} from "./core/perception";
 import { AStarPathfinder, type NavigationPoint } from "./core/pathfinding";
 import { buildCat, type CatRig } from "./models/cat";
 import { buildOwner, type OwnerRig } from "./models/owner";
@@ -22,7 +26,7 @@ import {
 import { CameraDirector } from "./camera/camera-director";
 import { CatController, type CatFrameState } from "./cat/cat-controller";
 
-type OwnerState = "routine" | "investigating" | "pursuing" | "returning";
+type OwnerState = "routine" | "investigating" | "pursuing" | "searching" | "returning";
 
 interface Objective {
   id: string;
@@ -102,6 +106,22 @@ export class CatscapadesGame {
   private readonly catFocus = new THREE.Vector3();
 
   private ownerState: OwnerState = "routine";
+  /** Live sight evaluation, refreshed every fixed step. */
+  private ownerSight: SightResult = { visible: false, clarity: 0, at: null, reason: "out-of-range" };
+  /** Where the cat was last actually seen, and how long ago. */
+  private readonly ownerLastSeen = new THREE.Vector3();
+  private ownerLastSeenAge = Infinity;
+  private ownerLastSeenHeading = 0;
+  private ownerHasLastSeen = false;
+  /** Search sweep around the last known position. */
+  private ownerSearchPoints: readonly SearchPoint[] = [];
+  private ownerSearchIndex = 0;
+  private ownerSearchTime = 0;
+  private ownerSearchHeading = 0;
+  /** Sight sample points on the cat, reused every frame. */
+  private readonly sightSamples = [
+    new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(),
+  ];
   private ownerStop = 0;
   private ownerDwell = 0;
   private ownerFacing = Math.PI;
@@ -142,6 +162,7 @@ export class CatscapadesGame {
   private paused = false;
   private debugVisible = false;
   private debugLines: THREE.LineSegments | null = null;
+  private sightCone: THREE.Mesh | null = null;
   private debugLinesAge = 0;
   private accumulator = 0;
   private lastFrameTime = performance.now() / 1000;
@@ -164,6 +185,10 @@ export class CatscapadesGame {
     private readonly successElement: HTMLElement,
   ) {
     this.level = buildLevel(this.scene, physics);
+    // Rapier's query pipeline is populated by `step`, so a world that has not
+    // stepped answers every raycast with "nothing there" — which would let the
+    // homeowner see through walls on the first frame. Step once up front.
+    physics.step();
 
     this.cat = buildCat();
     this.cat.root.position.copy(SPAWN.cat);
@@ -224,6 +249,7 @@ export class CatscapadesGame {
     this.debugVisible = !this.debugVisible;
     document.querySelector("#debug-panel")?.classList.toggle("visible", this.debugVisible);
     if (this.debugLines) this.debugLines.visible = this.debugVisible;
+    if (this.sightCone) this.sightCone.visible = this.debugVisible;
   }
 
   applySettings(settings: GameSettings): void {
@@ -291,6 +317,11 @@ export class CatscapadesGame {
       preparations: [...this.preparations],
       mugBroken: this.mugBroken,
       ownerState: this.ownerState,
+      ownerSight: {
+        reason: this.ownerSight.reason,
+        clarity: Number(this.ownerSight.clarity.toFixed(3)),
+        lastSeenAge: this.ownerHasLastSeen ? Number(this.ownerLastSeenAge.toFixed(2)) : null,
+      },
       ownerRoute: {
         algorithm: "A*",
         remainingWaypoints: Math.max(0, this.ownerPath.length - this.ownerWaypoint),
@@ -671,10 +702,61 @@ export class CatscapadesGame {
 
   // -- homeowner -------------------------------------------------------------
 
+  /**
+   * Evaluates what the homeowner can actually see, and remembers it.
+   *
+   * Pursuit and searching both work from `ownerLastSeen` rather than from the
+   * cat's live position: that is what makes breaking line of sight worth
+   * doing, and it is the whole reason the vision cone matters.
+   */
+  private updateOwnerSight(dt: number): void {
+    const cat = this.catPosition();
+    // Head, shoulder, and paws. Any one of them clearing the furniture is
+    // enough, which is what makes a cat on the worktop exposed and the same
+    // cat on the floor behind the counter hidden.
+    this.sightSamples[0]!.set(cat.x, cat.y + 0.34, cat.z);
+    this.sightSamples[1]!.set(cat.x, cat.y + 0.22, cat.z);
+    this.sightSamples[2]!.set(cat.x, cat.y + 0.06, cat.z);
+
+    const speed = this.catState?.planarSpeed ?? 0;
+    this.ownerSight = evaluateSight(
+      OWNER_SIGHT,
+      {
+        from: this.ownerPosition,
+        facing: this.ownerFacing,
+        targets: this.sightSamples,
+        stillness: 1 - smoothstep(0.15, 2.4, speed),
+        // Curled up in the box is real cover; a stalking crouch behind the
+        // furniture line only helps a little, but it helps.
+        concealment: clamp(
+          this.innocenceWeight * 0.96 + (this.stalkRequested ? 0.22 : 0),
+          0, 1,
+        ),
+      },
+      (from, to) => this.physics.hasLineOfSight(from, to),
+    );
+
+    if (this.ownerSight.visible) {
+      const seen = this.ownerSight.at ?? cat;
+      if (this.ownerHasLastSeen) {
+        // Remember which way it was heading, so a search looks on ahead first.
+        const dx = seen.x - this.ownerLastSeen.x;
+        const dz = seen.z - this.ownerLastSeen.z;
+        if (Math.hypot(dx, dz) > 0.25) this.ownerLastSeenHeading = Math.atan2(dx, dz);
+      }
+      this.ownerLastSeen.set(seen.x, 0, seen.z);
+      this.ownerLastSeenAge = 0;
+      this.ownerHasLastSeen = true;
+    } else {
+      this.ownerLastSeenAge += dt;
+    }
+  }
+
   private updateOwner(dt: number): void {
     const catPosition = this.catPosition();
     const toCat = this.ownerPosition.distanceTo(catPosition);
-    const catVisible = toCat < 7.5 && this.innocenceWeight < 0.5;
+    this.updateOwnerSight(dt);
+    const sight = this.ownerSight;
 
     if (this.ownerState === "routine") {
       const stop = OWNER_ROUTINE[this.ownerStop] ?? OWNER_ROUTINE[0];
@@ -684,6 +766,8 @@ export class CatscapadesGame {
         this.ownerCarrying = stop.action === "carry";
         if (stop.lookAt) this.ownerLookAt.set(stop.lookAt[0], stop.lookAt[1], stop.lookAt[2]);
         if (this.moveOwnerToward(this.ownerTarget, 1.35, dt)) {
+          // Stood at the stop: face the thing being attended to.
+          if (stop.lookAt) this.turnOwnerToward(stop.lookAt[0], stop.lookAt[2], dt);
           this.ownerDwell += dt;
           if (this.ownerDwell > stop.dwell) {
             this.ownerDwell = 0;
@@ -691,9 +775,11 @@ export class CatscapadesGame {
           }
         }
       }
-      // Notice the cat only when it is close, in the house, and not hiding.
-      if (catVisible && toCat < 4.2 && catPosition.x > -3.0 && this.innocenceWeight < 0.2) {
-        this.suspicion = Math.min(100, this.suspicion + dt * 14);
+      // Suspicion now climbs with how plainly the cat is seen rather than with
+      // raw proximity, so a clear look across the room escalates faster than a
+      // glimpse at the edge of vision, and no look at all escalates nothing.
+      if (sight.visible) {
+        this.suspicion = Math.min(100, this.suspicion + dt * (8 + sight.clarity * 30));
         if (this.suspicion > 55) this.beginPursuit();
       } else {
         this.suspicion = Math.max(0, this.suspicion - dt * 6);
@@ -702,6 +788,7 @@ export class CatscapadesGame {
       this.ownerReach = 0;
       this.ownerCarrying = false;
       if (this.moveOwnerToward(this.ownerTarget, 2.1, dt)) {
+        this.turnOwnerToward(this.ownerLookAt.x, this.ownerLookAt.z, dt);
         this.ownerDwell += dt;
         this.ownerReach = smoothstep(0.6, 1.4, this.ownerDwell);
         if (this.ownerDwell > 3.0) {
@@ -709,19 +796,71 @@ export class CatscapadesGame {
           this.ownerState = "returning";
         }
       }
-      if (catVisible && toCat < 3.4 && this.suspicion > 45) this.beginPursuit();
+      // An investigating homeowner is already looking hard, so a glimpse is
+      // enough to escalate where the routine would need a proper look.
+      if (sight.visible && sight.clarity > 0.12 && this.suspicion > 45) this.beginPursuit();
     } else if (this.ownerState === "pursuing") {
-      this.ownerReach = smoothstep(2.2, 1.2, toCat);
-      this.ownerTarget.copy(catPosition);
+      // Chase the last *known* position. While the cat is in sight that is
+      // effectively its live position; once it breaks away, the homeowner
+      // commits to where it went rather than tracking it through the cupboards.
+      const chase = this.ownerHasLastSeen ? this.ownerLastSeen : catPosition;
+      this.ownerReach = sight.visible ? smoothstep(2.2, 1.2, toCat) : 0;
+      this.ownerTarget.set(chase.x, 0, chase.z);
       this.moveOwnerToward(this.ownerTarget, 2.75, dt);
-      this.ownerLookAt.copy(catPosition).setY(catPosition.y + 0.3);
-      if (toCat < CATCH_DISTANCE && this.caughtCooldown <= 0 && (this.catState?.grounded ?? true)) {
+      if (sight.visible && sight.at) {
+        this.ownerLookAt.set(sight.at.x, sight.at.y + 0.1, sight.at.z);
+        this.turnOwnerToward(sight.at.x, sight.at.z, dt, 7);
+      } else {
+        this.ownerLookAt.set(chase.x, 0.5, chase.z);
+        this.turnOwnerToward(chase.x, chase.z, dt, 6);
+      }
+      if (sight.visible && toCat < CATCH_DISTANCE && this.caughtCooldown <= 0
+        && (this.catState?.grounded ?? true)) {
         this.catchCat();
       }
       this.suspicion = Math.max(0, this.suspicion - dt * 4);
-      if (this.suspicion < 20 || toCat > 9 || this.innocenceWeight > 0.6) {
+      if (this.suspicion < 20 || this.innocenceWeight > 0.6) {
         this.ownerState = "returning";
         this.ownerDwell = 0;
+      } else if (this.ownerLastSeenAge > 1.1) {
+        this.beginSearch();
+      }
+    } else if (this.ownerState === "searching") {
+      this.ownerReach = 0;
+      this.ownerCarrying = false;
+      this.ownerSearchTime += dt;
+      const point = this.ownerSearchPoints[this.ownerSearchIndex];
+      if (point) {
+        this.ownerTarget.set(point.x, 0, point.z);
+        this.ownerLookAt.set(point.x, 0.6, point.z);
+        if (this.moveOwnerToward(this.ownerTarget, 2.1, dt)) {
+          this.ownerDwell += dt;
+          // Standing on the spot and staring straight ahead is not searching.
+          // Sweep the body, which sweeps the vision cone with it, so a cat that
+          // froze just off the search line can still be swept up.
+          const sweep = this.ownerSearchHeading + Math.sin(this.ownerDwell * 2.4) * 1.15;
+          this.ownerFacing = dampAngle(this.ownerFacing, sweep, 5, dt);
+          this.ownerLookAt.set(
+            this.ownerPosition.x + Math.sin(sweep) * 3,
+            0.7,
+            this.ownerPosition.z + Math.cos(sweep) * 3,
+          );
+          if (this.ownerDwell > 1.5) {
+            this.ownerDwell = 0;
+            this.ownerSearchIndex += 1;
+            this.ownerSearchHeading = this.ownerFacing;
+          }
+        } else {
+          this.ownerSearchHeading = this.ownerFacing;
+        }
+      }
+      this.suspicion = Math.max(0, this.suspicion - dt * 2.5);
+      if (sight.visible && sight.clarity > 0.1) this.beginPursuit();
+      else if (this.ownerSearchIndex >= this.ownerSearchPoints.length || this.ownerSearchTime > 11) {
+        this.ownerState = "returning";
+        this.ownerDwell = 0;
+        this.ownerHasLastSeen = false;
+        this.showToast("They give up looking, and go back to the morning.");
       }
     } else {
       this.ownerReach = 0;
@@ -729,24 +868,56 @@ export class CatscapadesGame {
       const stop = OWNER_ROUTINE[this.ownerStop] ?? OWNER_ROUTINE[0];
       if (stop) {
         this.ownerTarget.set(stop.position[0], 0, stop.position[1]);
-        if (this.moveOwnerToward(this.ownerTarget, 1.7, dt)) this.ownerState = "routine";
+        if (this.moveOwnerToward(this.ownerTarget, 1.7, dt)) {
+          this.ownerState = "routine";
+          this.ownerDwell = 0;
+        }
       }
     }
 
     this.ownerAlarm = damp(
       this.ownerAlarm,
-      this.ownerState === "pursuing" ? 1 : this.ownerState === "investigating" ? 0.7 : this.suspicion / 140,
+      this.ownerState === "pursuing" ? 1
+        : this.ownerState === "searching" ? 0.8
+          : this.ownerState === "investigating" ? 0.7
+            : this.suspicion / 140,
       4, dt,
     );
     this.ownerSurprise = Math.max(0, this.ownerSurprise - dt * 1.6);
   }
 
   private beginPursuit(): void {
+    const resumed = this.ownerState === "searching";
     if (this.ownerState === "pursuing") return;
     this.ownerState = "pursuing";
     this.ownerSurprise = 1;
     this.ownerDwell = 0;
-    this.showToast("You have been spotted. Act natural. Or run.");
+    this.showToast(resumed
+      ? "Found. That hiding place is now a former hiding place."
+      : "You have been spotted. Act natural. Or run.");
+  }
+
+  /**
+   * Sight has been lost mid-chase. Sweep the last known position instead of
+   * either giving up instantly or tracking the cat through the furniture —
+   * breaking line of sight should buy time, not safety.
+   */
+  private beginSearch(): void {
+    if (!this.ownerHasLastSeen) {
+      this.ownerState = "returning";
+      this.ownerDwell = 0;
+      return;
+    }
+    this.ownerState = "searching";
+    this.ownerSearchPoints = searchPattern(
+      { x: this.ownerLastSeen.x, z: this.ownerLastSeen.z },
+      this.ownerLastSeenHeading,
+      2.3,
+    );
+    this.ownerSearchIndex = 0;
+    this.ownerSearchTime = 0;
+    this.ownerDwell = 0;
+    this.showToast("They lost you, and start looking.");
   }
 
   private moveOwnerToward(target: THREE.Vector3, speed: number, dt: number): boolean {
@@ -812,6 +983,22 @@ export class CatscapadesGame {
     return false;
   }
 
+  /**
+   * Turns the homeowner's body towards a point.
+   *
+   * `moveOwnerToward` only steers while there is a waypoint left, so a
+   * stationary homeowner used to keep whatever heading they arrived on while
+   * their head looked somewhere else entirely. That was invisible until sight
+   * became directional: the vision cone follows the body, so a homeowner
+   * reaching for the kettle has to actually be facing the kettle.
+   */
+  private turnOwnerToward(x: number, z: number, dt: number, rate = 5): void {
+    const dx = x - this.ownerPosition.x;
+    const dz = z - this.ownerPosition.z;
+    if (Math.hypot(dx, dz) < 0.08) return;
+    this.ownerFacing = dampAngle(this.ownerFacing, Math.atan2(dx, dz), rate, dt);
+  }
+
   private planOwnerPath(target: THREE.Vector3): void {
     const result = this.ownerPathfinder.findPath(
       { x: this.ownerPosition.x, z: this.ownerPosition.z },
@@ -861,6 +1048,10 @@ export class CatscapadesGame {
     this.catTravel = 0;
     this.ownerState = "returning";
     this.ownerDwell = 0;
+    // The cat is back in the garden; nothing the homeowner remembers seeing is
+    // worth searching any more.
+    this.ownerHasLastSeen = false;
+    this.ownerLastSeenAge = Infinity;
     this.suspicion = 30;
     this.showToast("Caught, carried outside, and deposited with great ceremony.");
   }
@@ -1009,6 +1200,7 @@ export class CatscapadesGame {
       this.debugLinesAge = 0;
       this.refreshDebugLines();
     }
+    this.refreshSightCone();
     const panel = document.querySelector<HTMLElement>("#debug-panel");
     if (!panel) return;
     const state = this.catState;
@@ -1023,11 +1215,50 @@ export class CatscapadesGame {
       `Jump target  ${this.controller.availableJumpTarget()?.id ?? "—"}`,
       `Carrying     ${this.carrying?.spec.id ?? "—"}`,
       `Owner        ${this.ownerState}  suspicion ${Math.round(this.suspicion)}`,
+      `Sight        ${this.ownerSight.reason}  clarity ${this.ownerSight.clarity.toFixed(2)}`
+      + `  last seen ${this.ownerHasLastSeen ? `${this.ownerLastSeenAge.toFixed(1)}s ago` : "never"}`,
       `Camera       ${this.director.currentZoneId()}`,
       `Preparations ${this.preparations.size}`,
       `Awake bodies ${this.physics.activeBodyCount()}/${this.physics.bodies().length}`,
       `Catastrophe  ${this.catastrophe ? "triggered" : "pending"}`,
     ].join("\n");
+  }
+
+  /**
+   * The homeowner's vision cone, drawn on the floor.
+   *
+   * Sight is now the rule the whole stealth layer rests on, so it has to be
+   * inspectable: without seeing the cone you cannot tell a fair detection from
+   * a bug. It turns green the moment the cat is actually seen.
+   */
+  private refreshSightCone(): void {
+    if (!this.sightCone) {
+      const shape = new THREE.Shape();
+      shape.moveTo(0, 0);
+      const segments = 24;
+      for (let index = 0; index <= segments; index += 1) {
+        const angle = -OWNER_SIGHT.halfAngle + (index / segments) * OWNER_SIGHT.halfAngle * 2;
+        const reach = rangeAtAngle(OWNER_SIGHT, angle);
+        shape.lineTo(Math.sin(angle) * reach, Math.cos(angle) * reach);
+      }
+      shape.lineTo(0, 0);
+      const geometry = new THREE.ShapeGeometry(shape);
+      // The shape is authored in XY with +y forward, and the rig's forward is
+      // +z. A negative quarter turn here would lay the cone out behind the
+      // homeowner, which looks plausible until you notice it never lights up.
+      geometry.rotateX(Math.PI / 2);
+      this.sightCone = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+        color: 0xffb703, transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide,
+      }));
+      this.sightCone.renderOrder = 19;
+      this.scene.add(this.sightCone);
+    }
+    this.sightCone.visible = this.debugVisible;
+    this.sightCone.position.set(this.ownerPosition.x, 0.03, this.ownerPosition.z);
+    this.sightCone.rotation.y = this.ownerFacing;
+    const material = this.sightCone.material as THREE.MeshBasicMaterial;
+    material.color.setHex(this.ownerSight.visible ? 0x35c463 : 0xffb703);
+    material.opacity = 0.2 + this.ownerSight.clarity * 0.3;
   }
 
   /** Rapier's own collider wireframes, so collision bugs are visible. */

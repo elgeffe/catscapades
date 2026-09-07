@@ -12,6 +12,7 @@ A desktop browser stealth-comedy MVP about an extremely innocent cat. Observe a 
 - A three-room house built from typed level data: kitchen, breakfast room, utility nook and garden, with procedural wood, tile, grass and plaster surfaces
 - Contextual paw actions, five carryable item types, and escalating disaster states (running sink → pooling → overflow, punctured flour, opened cupboard, broken crockery)
 - One homeowner with a morning routine, stimulus investigation, suspicion, pursuit and forgiving catch/reset behaviour
+- Believable homeowner perception: a directional vision cone with peripheral falloff, real line of sight traced against the walls and furniture, and stillness and the cardboard box as genuine cover; losing them sends them to where you *were*, to sweep it and search rather than track you through the cupboards
 - Six-stage objective chain, multi-condition finale, and four optional challenges
 - A standalone model viewer plus headless model inspection and screenshot tooling
 - Desktop keyboard and standard gamepad controls
@@ -107,6 +108,7 @@ The camera is authored by zone. Each zone provides a fixed composition, a target
 | Orchestration | `src/game.ts` |
 | Physics | `src/physics/physics-world.ts` (Rapier world, character controller, dynamic bodies, ledge probe) |
 | Cat locomotion | `src/cat/cat-controller.ts` |
+| Homeowner perception | `src/core/perception.ts` |
 | Animation | `src/anim/cat-animator.ts`, `src/anim/leg-ik.ts`, `src/anim/owner-animator.ts` |
 | Camera | `src/camera/camera-director.ts` |
 | Models | `src/models/` — `cat.ts`, `cat-geometry.ts`, `owner.ts`, `furniture.ts`, `props.ts`, `materials.ts`, `registry.ts`, `inspect.ts` |

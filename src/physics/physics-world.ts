@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { Point3 } from "../core/perception";
 import RAPIER from "@dimforge/rapier3d-compat";
 import type { NavigationObstacle } from "../core/pathfinding";
 
@@ -228,6 +229,7 @@ export class PhysicsWorld {
   private readonly world: RAPIER.World;
   private readonly dynamicBodies: DynamicBody[] = [];
   private readonly staticLabels = new Map<number, string>();
+  private readonly sightDirection = new THREE.Vector3();
   private readonly staticObstacles: {
     readonly center: THREE.Vector3;
     readonly halfExtents: THREE.Vector3;
@@ -337,6 +339,37 @@ export class PhysicsWorld {
       if (best) break;
     }
     return best;
+  }
+
+  /**
+   * True when nothing solid blocks the segment between two world points.
+   *
+   * Only the authored static world — walls, doors, and furniture — occludes
+   * sight, which keeps what the player can reason about the same as what the
+   * code checks. Everything else is filtered out for a reason:
+   *
+   * - sensors are trigger volumes, not walls;
+   * - dynamic props are swipeable clutter, and a homeowner is not blinded by
+   *   a sock that happens to be in the way;
+   * - kinematic bodies are the cat and the homeowner themselves. Without this
+   *   the homeowner's own capsule blocks every downward sightline out of their
+   *   own eyes, and the cat's capsule blocks the ray that is looking for it.
+   */
+  hasLineOfSight(from: Readonly<Point3>, to: Readonly<Point3>): boolean {
+    this.sightDirection.set(to.x - from.x, to.y - from.y, to.z - from.z);
+    const distance = this.sightDirection.length();
+    if (distance < 1e-4) return true;
+    this.sightDirection.multiplyScalar(1 / distance);
+    const ray = new RAPIER.Ray(
+      { x: from.x, y: from.y, z: from.z },
+      { x: this.sightDirection.x, y: this.sightDirection.y, z: this.sightDirection.z },
+    );
+    const hit = this.world.castRay(
+      ray, distance, true, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS
+        | RAPIER.QueryFilterFlags.EXCLUDE_DYNAMIC
+        | RAPIER.QueryFilterFlags.EXCLUDE_KINEMATIC,
+    );
+    return hit === null;
   }
 
   step(): void {
