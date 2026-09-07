@@ -172,6 +172,33 @@ audio; `strideRate()` reports the odometer clock for the debug overlay.
   ones, and raises the outside swing arc, so the cat steps round its own axis.
   Outside is `leg.side * sign(smoothedTurn)`.
 
+## Leaping
+
+A leap runs **gather → arc → recover**, and every phase has its own signal:
+
+| Phase | Signal | What the animator does |
+| --- | --- | --- |
+| gather | `gather` 0→1 over `JUMP_GATHER` (0.12 s) | haunches sink, spine loads, tail drops as a counterweight, head stays locked level, hind prints drawn under the hips and forepaws eased back — all still on the floor |
+| flight | `airborne` + `jumpProgress` 0→1 | hind legs driven straight out behind at take-off (that extension *is* the push), then folded under the belly; forepaws tucked, then unfolding forward and reaching down |
+| recover | `landRecover` 1→0 over `JUMP_RECOVER` | forepaws already down and splayed taking the impact; hind legs stay folded and only then swing under and plant |
+
+`landImpact` carries the *force* of a landing and `landRecover` its *timing*.
+Both are needed: force alone cannot order forepaws before hind, and landing on
+all fours at once is the tell of a canned jump.
+
+The coil is a real grounded window, so the cat keeps its collider and its
+contacts throughout. `coilWeight` tracks the controller's gather ramp directly
+rather than damping the rise — damping it would simply mean the cat never
+finishes loading before it launches. The coil moves the *prints*, not the pose:
+placing it after the ground pin would let the pin override it, and a gathering
+cat genuinely repositions its paws.
+
+`beginArc` no longer snaps the facing; the coil turns the cat towards its
+landing, and the arc keeps turning in the air for a leap the coil could not
+finish aiming. The arc still ends exactly on the authored landing point, and a
+landing exits with momentum only in proportion to how much the player is still
+asking to move — so releasing the stick parks the cat precisely on a ledge.
+
 ## Tail
 
 `updateTail` simulates the chain in **world space** using fixed 120 Hz verlet

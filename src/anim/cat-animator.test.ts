@@ -239,3 +239,107 @@ describe("cat stride grounding", () => {
     expect(peak).toBeGreaterThan(0.03);
   });
 });
+
+describe("cat jump sequence", () => {
+  /** Runs the animator through a scripted leap, sampling every frame. */
+  function leap(options: { readonly gatherFrames?: number; readonly flightFrames?: number } = {}) {
+    const rig = buildCat();
+    const animator = new CatAnimator(rig);
+    const gatherFrames = options.gatherFrames ?? 8;
+    const flightFrames = options.flightFrames ?? 30;
+    const paws = (): Map<string, THREE.Vector3> => {
+      rig.root.updateMatrixWorld(true);
+      return new Map(rig.legs.map((leg) => [leg.id, leg.paw.getWorldPosition(new THREE.Vector3())]));
+    };
+
+    const approach: CatAnimationInput = { ...NEUTRAL_CAT_ANIMATION, speed: 2.4, travel: 2.4 * STEP };
+    for (let frame = 0; frame < 90; frame += 1) animator.update(STEP, approach);
+    const standing = { paws: paws(), rideHeight: rig.body.position.y };
+
+    for (let frame = 0; frame < gatherFrames; frame += 1) {
+      animator.update(STEP, { ...NEUTRAL_CAT_ANIMATION, gather: (frame + 1) / gatherFrames });
+    }
+    const coiled = { paws: paws(), rideHeight: rig.body.position.y, spine: rig.spineLower.rotation.x };
+
+    const flight: { progress: number; paws: Map<string, THREE.Vector3> }[] = [];
+    for (let frame = 0; frame < flightFrames; frame += 1) {
+      const progress = (frame + 1) / flightFrames;
+      animator.update(STEP, { ...NEUTRAL_CAT_ANIMATION, airborne: 1, jumpProgress: progress });
+      flight.push({ progress, paws: paws() });
+    }
+
+    const recovery: { settling: number; paws: Map<string, THREE.Vector3> }[] = [];
+    for (let frame = 0; frame < 16; frame += 1) {
+      const settling = 1 - (frame + 1) / 16;
+      animator.update(STEP, {
+        ...NEUTRAL_CAT_ANIMATION, landImpact: settling, landRecover: settling, speed: 1.6 * (1 - settling),
+        travel: 1.6 * (1 - settling) * STEP,
+      });
+      recovery.push({ settling, paws: paws() });
+    }
+    return { rig, standing, coiled, flight, recovery };
+  }
+
+  it("coils onto its hocks before launching, with the paws still on the floor", () => {
+    const { rig, standing, coiled } = leap();
+    expect(coiled.rideHeight).toBeLessThan(standing.rideHeight - 0.04);
+    // Loaded spine, not merely a lower cat.
+    expect(coiled.spine).toBeGreaterThan(0.05);
+    // The coil happens on the ground: every sole is still down.
+    for (const leg of rig.legs) {
+      expect(coiled.paws.get(leg.id)!.y, leg.id).toBeLessThan(0.02);
+    }
+    // Hind paws are drawn forward, under the hips, to push from.
+    for (const leg of rig.legs.filter((entry) => !entry.isFront)) {
+      expect(coiled.paws.get(leg.id)!.z, leg.id)
+        .toBeGreaterThan(standing.paws.get(leg.id)!.z + 0.02);
+    }
+  });
+
+  it("pushes off extended, folds up, and reaches out with the forepaws", () => {
+    const { flight } = leap();
+    const at = (progress: number) => flight.reduce(
+      (best, frame) => (Math.abs(frame.progress - progress) < Math.abs(best.progress - progress) ? frame : best),
+    );
+    const hindZ = (frame: typeof flight[number]) => frame.paws.get("hind-left")!.z;
+    const hindY = (frame: typeof flight[number]) => frame.paws.get("hind-left")!.y;
+    const frontZ = (frame: typeof flight[number]) => frame.paws.get("front-left")!.z;
+
+    // Take-off: hind legs driven out behind, and lower than when folded.
+    expect(hindZ(at(0.05))).toBeLessThan(hindZ(at(0.5)) - 0.1);
+    expect(hindY(at(0.05))).toBeLessThan(hindY(at(0.5)));
+    // Forepaws unfold forward across the flight and keep reaching.
+    expect(frontZ(at(0.5))).toBeGreaterThan(frontZ(at(0.05)) + 0.05);
+    expect(frontZ(at(0.95))).toBeGreaterThan(frontZ(at(0.5)));
+    // Nothing pops: the whole sequence is continuous.
+    for (let index = 1; index < flight.length; index += 1) {
+      for (const leg of ["hind-left", "front-left"]) {
+        const step = flight[index]!.paws.get(leg)!.distanceTo(flight[index - 1]!.paws.get(leg)!);
+        expect(step, `${leg} at ${flight[index]!.progress}`).toBeLessThan(0.06);
+      }
+    }
+  });
+
+  it("lands on the forepaws before the hind legs swing under", () => {
+    const { recovery } = leap();
+    /** First recovery frame on which this sole is carrying weight. */
+    const contactFrame = (id: string): number => {
+      const index = recovery.findIndex((frame) => frame.paws.get(id)!.y < 0.02);
+      expect(index, id).toBeGreaterThanOrEqual(0);
+      return index;
+    };
+
+    // At front contact the forepaws are already down and the hind legs are not.
+    const first = recovery[0]!;
+    expect(first.paws.get("front-left")!.y).toBeLessThan(0.02);
+    expect(first.paws.get("hind-left")!.y)
+      .toBeGreaterThan(first.paws.get("front-left")!.y + 0.02);
+
+    // Both hind legs then swing under and take the floor, later than the front
+    // pair but well before the recovery is over.
+    for (const leg of ["hind-left", "hind-right"]) {
+      expect(contactFrame(leg), leg).toBeGreaterThan(contactFrame("front-left"));
+      expect(contactFrame(leg), leg).toBeLessThan(recovery.length - 3);
+    }
+  });
+});

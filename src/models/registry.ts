@@ -97,21 +97,25 @@ const CAT_CLIPS: Readonly<Record<string, CatClipState>> = {
   jump: {
     input: {},
     at: (time, input) => {
-      const cycle = (time % 1.8) / 1.8;
-      if (cycle < 0.16) {
-        input.speed = 1.2;
-        input.airborne = 0;
-      } else if (cycle < 0.78) {
-        const progress = (cycle - 0.16) / 0.62;
-        input.speed = 4.2;
+      // Approach, coil, flight, front contact, recovery — the same phases and
+      // proportions `CatController` drives, so the clip reviews the real thing.
+      const cycle = (time % 2) / 2;
+      if (cycle < 0.28) {
+        input.speed = 2.4;
+      } else if (cycle < 0.36) {
+        input.gather = (cycle - 0.28) / 0.08;
+      } else if (cycle < 0.74) {
         input.airborne = 1;
-        input.jumpProgress = progress;
+        input.jumpProgress = (cycle - 0.36) / 0.38;
       } else {
-        input.speed = 1.6;
-        input.landImpact = 1 - (cycle - 0.78) / 0.22;
+        const settled = (cycle - 0.74) / 0.26;
+        input.speed = 1.6 * settled;
+        input.landImpact = 1 - settled;
+        input.landRecover = 1 - settled;
       }
     },
   },
+  crouch: { input: { gather: 1, alert: 1 } },
   swipe: {
     input: { alert: 0.8 },
     at: (time, input) => { input.swipe = Math.max(0, Math.sin((time % 1.4) / 0.45 * Math.PI)); },

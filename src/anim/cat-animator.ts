@@ -51,6 +51,11 @@ export interface CatAnimationInput {
   stalking: boolean;
   /** 0 grounded, 1 fully airborne. */
   airborne: number;
+  /**
+   * Coil before a leap, 0..1. The cat is still on the floor: haunches down,
+   * spine loaded, hind paws drawn under the hips, gaze locked on the landing.
+   */
+  gather: number;
   /** 0 at take-off, 1 at touchdown. Only meaningful while `airborne > 0`. */
   jumpProgress: number;
   /** 0 idle, 1 at the peak of a paw strike. */
@@ -69,6 +74,12 @@ export interface CatAnimationInput {
   lookAt: THREE.Vector3 | null;
   /** 0..1 spike applied on touchdown, decayed by the caller. */
   landImpact: number;
+  /**
+   * 1 at front-paw contact falling to 0 once recovered. Carries the *timing* of
+   * a landing where `landImpact` carries its force, which is what lets the
+   * forepaws take the floor before the hind legs swing under.
+   */
+  landRecover: number;
 }
 
 export const NEUTRAL_CAT_ANIMATION: CatAnimationInput = {
@@ -79,6 +90,7 @@ export const NEUTRAL_CAT_ANIMATION: CatAnimationInput = {
   brake: 0,
   stalking: false,
   airborne: 0,
+  gather: 0,
   jumpProgress: 0,
   swipe: 0,
   meow: 0,
@@ -88,6 +100,7 @@ export const NEUTRAL_CAT_ANIMATION: CatAnimationInput = {
   alert: 0,
   lookAt: null,
   landImpact: 0,
+  landRecover: 0,
 };
 
 interface GaitProfile {
@@ -224,6 +237,7 @@ export class CatAnimator {
   private sleepWeight = 0;
   private carryWeight = 0;
   private braceWeight = 0;
+  private coilWeight = 0;
   private breath = 0;
   private blinkTimer = 1.6;
   private blink = 0;
@@ -404,6 +418,11 @@ export class CatAnimator {
     this.sleepWeight = damp(this.sleepWeight, input.sleeping, 3.2, dt);
     this.carryWeight = damp(this.carryWeight, input.carrying ? 1 : 0, 7, dt);
     this.braceWeight = damp(this.braceWeight, clamp(input.brake, 0, 1), 11, dt);
+    // The coil is owned by the controller's gather window, which is short and
+    // fixed. Damping the rise would simply mean the cat never finishes loading
+    // before it launches, so track the ramp directly and damp only the release.
+    const coil = clamp(input.gather, 0, 1);
+    this.coilWeight = coil >= this.coilWeight ? coil : damp(this.coilWeight, coil, 34, dt);
     this.earAlert = damp(this.earAlert, input.alert, 7, dt);
     this.breath += dt * (this.sleepWeight > 0.5 ? 1.5 : 2.4 + this.smoothedSpeed * 0.35);
   }
@@ -426,6 +445,8 @@ export class CatAnimator {
     // A braking cat drops its hindquarters and gets its weight behind the
     // stopping forepaws, rather than gliding to a halt at ride height.
     const braceDrop = -this.braceWeight * 0.026;
+    // The coil sinks the whole cat onto its hocks; the launch releases it.
+    const coilDrop = -this.coilWeight * 0.08;
     const rideScale = lerp(1, gait.crouch, this.crouchWeight * 0.85 + (gait.name === "creep" ? 0.15 : 0));
     // A sit lowers the haunches while the pitched body and flexed spine keep
     // the chest upright. A loaf settles the sternum almost onto the floor;
@@ -434,7 +455,7 @@ export class CatAnimator {
     const sleepDrop = -this.sleepWeight * 0.17;
 
     const height = this.rig.standHeight * rideScale + bob + gallopDrop + airborneLift
-      + landCrouch + idleBreath + sitLift + sleepDrop + braceDrop;
+      + landCrouch + idleBreath + sitLift + sleepDrop + braceDrop + coilDrop;
     this.bodyLift = damp(this.bodyLift, height, 22, dt);
     this.rig.body.position.y = this.bodyLift;
 
@@ -443,7 +464,8 @@ export class CatAnimator {
     const flightPitch = input.airborne * lerp(-0.18, 0.16, clamp(input.jumpProgress, 0, 1));
     const landPitch = input.landImpact * 0.22;
     const restPitch = -this.sitWeight * 0.24 + this.sleepWeight * 0.018;
-    const targetPitch = accelPitch + flightPitch + landPitch + restPitch + this.braceWeight * 0.06
+    const targetPitch = accelPitch + flightPitch + landPitch + restPitch
+      + this.braceWeight * 0.06 - this.coilWeight * 0.07
       + Math.sin(this.cycle * Math.PI * 2) * gait.flex * 0.35 * motion;
     this.bodyPitch = damp(this.bodyPitch, targetPitch, 14, dt);
     this.rig.body.rotation.x = this.bodyPitch;
@@ -482,7 +504,12 @@ export class CatAnimator {
       + smoothstep(0.72, 1, jump) * 0.15
     );
     const target = arch + flightArch + this.crouchWeight * 0.1
-      - this.sitWeight * 0.34 + this.sleepWeight * 0.08 - this.braceWeight * 0.13;
+      - this.sitWeight * 0.34 + this.sleepWeight * 0.08 - this.braceWeight * 0.13
+      // Loading the spine is what makes the launch look like stored energy
+      // rather than a sudden change of altitude.
+      + this.coilWeight * 0.26
+      // …and the forequarters absorb through it on the way back down.
+      + input.landRecover * input.landImpact * 0.2;
     this.spineFlex = damp(this.spineFlex, target, 15, dt);
     this.rig.spineLower.rotation.x = this.spineFlex * 0.55;
     this.rig.spineUpper.rotation.x = this.spineFlex * 0.45;
@@ -548,6 +575,7 @@ export class CatAnimator {
       // Which side of the turn this leg is on: +1 outside, -1 inside.
       const outside = leg.side * turnSign;
       const printX = leg.restTarget.x
+        + this.coilWeight * leg.side * 0.012
         // Inside legs shorten and outside legs reach while turning.
         + this.smoothedTurn * 0.014 * leg.side * (leg.isFront ? 1.2 : 0.8)
         // A deliberate turning step: the outside paws are placed wide and the
@@ -563,7 +591,10 @@ export class CatAnimator {
         // pulled back out of the way of the pivot.
         + turnStep * 0.045 * outside * (leg.isFront ? 1 : -0.4)
         // The brace: forepaws stop the cat out in front, hocks gather under it.
-        + (leg.isFront ? brace * 0.07 : -brace * 0.05);
+        + (leg.isFront ? brace * 0.07 : -brace * 0.05)
+        // The coil draws the hind paws in under the hips to push from, and
+        // eases the forepaws back out of the way.
+        + this.coilWeight * (leg.isFront ? -0.035 : 0.085);
 
       contact.planted = false;
       if (airborne > 0.5) {
@@ -576,6 +607,14 @@ export class CatAnimator {
         contact.x = printX;
         contact.z = printZ;
         contact.planted = true;
+      } else if (down && this.coilWeight > 0.01) {
+        // Gathering repositions the feet: a cat drawing itself together does
+        // shuffle its hind paws under its hips rather than launching from
+        // wherever they happened to be standing. Drag the contact rather than
+        // re-planting it, so the sole scrabbles into place instead of jumping.
+        const drag = this.coilWeight * 0.32;
+        contact.x = lerp(contact.x, printX, drag);
+        contact.z = lerp(contact.z, printZ, drag);
       } else if (down) {
         // A gait re-timing mid-stance (a walk becoming a gallop changes both
         // the stride and the duty) can recede a contact past what the limb can
@@ -616,9 +655,11 @@ export class CatAnimator {
         curl = Math.sin(swingT * Math.PI) * 0.36;
       }
 
-      // Collapse onto the rest target as the cat comes to a halt.
-      x = lerp(leg.restTarget.x, x, gaitWeight);
-      z = lerp(leg.restTarget.z, z, gaitWeight);
+      // Collapse onto the rest target as the cat comes to a halt — but a
+      // coiling cat has come to a halt on purpose, and its stance is the point.
+      const settled = Math.max(gaitWeight, this.coilWeight);
+      x = lerp(leg.restTarget.x, x, settled);
+      z = lerp(leg.restTarget.z, z, settled);
 
       // The locomotion contact, kept aside before the pose overrides below
       // reshape `x`/`z` for a sit, a loaf, a tuck, or a paw strike.
@@ -630,20 +671,44 @@ export class CatAnimator {
       let y = -rideHeight + liftArc;
 
       if (input.airborne > 0.01) {
-        const tuck = input.airborne;
+        const flight = input.airborne;
         const progress = clamp(input.jumpProgress, 0, 1);
-        const landing = smoothstep(0.62, 1, progress);
         if (leg.isFront) {
-          const reach = lerp(leg.restTarget.z - 0.025, leg.restTarget.z + 0.21, smoothstep(0.12, 0.72, progress));
-          z = lerp(z, reach, tuck);
-          y = lerp(y, -rideHeight + lerp(0.145, 0.014, landing), tuck);
+          // Tucked under the chest off the floor, then unfolding forward and
+          // reaching down so the forepaws arrive first.
+          const folded = 1 - smoothstep(0, 0.3, progress);
+          const extend = smoothstep(0.16, 0.78, progress);
+          z = lerp(z, leg.restTarget.z - folded * 0.055 + extend * 0.235, flight);
+          y = lerp(y, -rideHeight + 0.155 * (1 - smoothstep(0.34, 0.96, progress)), flight);
+          curl = lerp(curl, folded * 0.42, flight);
         } else {
-          const gather = Math.sin(smoothstep(0.08, 0.76, progress) * Math.PI);
-          z = lerp(z, leg.restTarget.z - 0.11 + gather * 0.16, tuck);
-          y = lerp(y, -rideHeight + lerp(0.07 + gather * 0.11, 0.055, landing), tuck);
+          // Driven straight out behind at take-off — that extension *is* the
+          // push — then folded up under the belly and swung forward to land.
+          const push = 1 - smoothstep(0, 0.26, progress);
+          const fold = smoothstep(0.18, 0.62, progress);
+          const swing = smoothstep(0.68, 1, progress);
+          z = lerp(z, leg.restTarget.z - push * 0.135 + fold * 0.185 - swing * 0.045, flight);
+          y = lerp(y, -rideHeight + fold * 0.15 - swing * 0.115, flight);
+          curl = lerp(curl, (1 - push) * fold * 0.3, flight);
         }
-        curl = lerp(curl, (1 - landing) * 0.28, tuck);
-        groundWeight *= 1 - tuck;
+        groundWeight *= 1 - flight;
+      }
+
+      // Landing, in order: the forepaws are already down and taking the impact
+      // while the hind legs are still folded, and only then swing under and
+      // plant. Landing on all fours at once is the tell of a canned jump.
+      if (input.landRecover > 0.01) {
+        const settling = input.landRecover;
+        if (leg.isFront) {
+          // Splayed and pressed: the forelimbs are the shock absorber.
+          x = lerp(x, x + leg.side * 0.024, settling);
+        } else {
+          const trailing = smoothstep(0.52, 1, settling);
+          z = lerp(z, leg.restTarget.z + 0.1, trailing);
+          y = lerp(y, -rideHeight + 0.062, trailing);
+          curl = lerp(curl, 0.2, trailing);
+          groundWeight *= 1 - trailing;
+        }
       }
 
       if (this.sitWeight > 0.01) {
@@ -755,6 +820,9 @@ export class CatAnimator {
     targetYaw += this.smoothedTurn * 0.06;
 
     targetPitch += this.crouchWeight * 0.2 + this.carryWeight * 0.24 - input.meow * 0.45;
+    // A coiling cat holds its head level and locked on: counter the sinking
+    // haunches rather than following them down.
+    targetPitch -= this.coilWeight * 0.16;
     targetPitch += this.sleepWeight * 0.4;
     targetYaw += this.sleepWeight * 0.28;
 
@@ -971,6 +1039,9 @@ export class CatAnimator {
     );
     neutral.lerp(upright, alert);
     neutral.y += input.airborne * length * Math.sin(t * Math.PI) * 0.18;
+    // Coiling drops the tail low and straight behind, as a counterweight.
+    neutral.y -= this.coilWeight * length * 0.22 * t;
+    neutral.z -= this.coilWeight * length * 0.06 * t;
 
     if (pose > 0.001) {
       // Resting tails settle behind the haunch with a small lateral bow. This

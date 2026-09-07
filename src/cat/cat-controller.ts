@@ -24,6 +24,12 @@ import { clamp, damp, dampAngle, shortestAngle, smoothstep } from "../core/math"
  * and drops back where it started. Instead the jump commits to an authored arc
  * that ends exactly on the landing point. Locomotion is owned by the arc for
  * its duration, which is what makes "leap onto the worktop" mean it.
+ *
+ * A leap runs as gather → arc → recover. The gather is a real, short window in
+ * which the cat is still on the floor: it kills its drift and swings round to
+ * face the landing, so the leap is aimed rather than teleported into alignment.
+ * The arc then owns the transform, and the recovery hands control back with the
+ * momentum the landing earned instead of stopping the cat dead on the worktop.
  */
 
 export const CAT_SPEEDS = {
@@ -41,6 +47,12 @@ const MAX_LEDGE_HEIGHT = 1.5;
 const LEDGE_REACH = 1.05;
 const COYOTE_TIME = 0.12;
 const JUMP_BUFFER = 0.16;
+/** Coil before an authored leap. Long enough to read, short enough to obey. */
+const JUMP_GATHER = 0.12;
+/** Front-contact-to-recovered window after an authored landing. */
+const JUMP_RECOVER = 0.26;
+/** Speed carried out of a landing when the player is still asking to move. */
+const JUMP_EXIT_SPEED = 1.6;
 
 export interface CatMoveInput {
   readonly moveX: number;
@@ -75,8 +87,19 @@ export interface CatFrameState {
   readonly grounded: boolean;
   readonly airborne: number;
   readonly jumpProgress: number;
+  /**
+   * Coil before an authored leap, 0..1. The cat is still on the floor for its
+   * whole duration.
+   */
+  readonly gather: number;
   /** Set for one frame on touchdown, scaled by impact speed. */
   readonly landImpact: number;
+  /**
+   * 1 at front-paw contact falling to 0 once recovered. Separate from
+   * `landImpact`, which carries the *magnitude* of the impact: this carries its
+   * timing, which is what orders forepaws before hind.
+   */
+  readonly landRecover: number;
   readonly activeJumpTarget: JumpTargetSpec | null;
 }
 
@@ -101,6 +124,7 @@ export class CatController {
   private coyote = 0;
   private jumpBuffer = 0;
   private landImpact = 0;
+  private landRecover = 0;
   private jumpStartY = 0;
   private jumpPeakY = 0;
   private jumping = false;
@@ -111,6 +135,12 @@ export class CatController {
   private arcElapsed = 0;
   private arcDuration = 0;
   private arcHeight = 0;
+
+  /** Coil state. While gathering the cat is grounded and aiming, not yet flying. */
+  private readonly gatherLanding = new THREE.Vector3();
+  private gatherElapsed = 0;
+  private gathering = false;
+  private gatherWeight = 0;
 
   /** Target the current jump is committed to, for camera and prompt copy. */
   private committedTarget: JumpTargetSpec | null = null;
@@ -136,6 +166,9 @@ export class CatController {
     this.velocity.set(0, 0, 0);
     this.jumping = false;
     this.arcDuration = 0;
+    this.gathering = false;
+    this.gatherWeight = 0;
+    this.landRecover = 0;
     this.committedTarget = null;
     this.airborneBlend = 0;
     this.brake = 0;
@@ -148,13 +181,21 @@ export class CatController {
     this.coyote = Math.max(0, this.coyote - dt);
     this.jumpBuffer = Math.max(0, this.jumpBuffer - dt);
     this.landImpact = Math.max(0, this.landImpact - dt * 4.5);
+    this.landRecover = Math.max(0, this.landRecover - dt / JUMP_RECOVER);
     if (input.jumpPressed) this.jumpBuffer = JUMP_BUFFER;
 
-    if (this.arcDuration > 0) return this.advanceArc(dt);
+    if (this.arcDuration > 0) return this.advanceArc(dt, input);
 
-    this.applyHorizontal(dt, input, forward, right);
-    this.offeredTarget = this.resolveJumpTarget();
-    this.applyVertical(dt);
+    const coiling = this.gathering;
+    if (coiling) {
+      // Launching mid-coil hands the frame straight to the arc.
+      if (this.advanceGather(dt)) return this.advanceArc(dt, input);
+    } else {
+      this.gatherWeight = damp(this.gatherWeight, 0, 20, dt);
+      this.applyHorizontal(dt, input, forward, right);
+      this.offeredTarget = this.resolveJumpTarget();
+      this.applyVertical(dt);
+    }
 
     this.body.setSnapEnabled(!this.jumping && this.velocity.y <= 0.02);
     this.desired.set(this.velocity.x * dt, this.velocity.y * dt, this.velocity.z * dt);
@@ -164,7 +205,9 @@ export class CatController {
     this.position.copy(result.position);
 
     this.reconcile(dt, result.grounded, result.translation.y);
-    this.updateFacing(dt, input.moveX !== 0 || input.moveY !== 0);
+    // The coil aims the cat at its landing itself; letting the stick fight that
+    // would be a player steering a jump that is already committed.
+    if (!coiling) this.updateFacing(dt, input.moveX !== 0 || input.moveY !== 0);
 
     const planarSpeed = Math.hypot(this.velocity.x, this.velocity.z);
     this.acceleration = (planarSpeed - this.previousSpeed) / Math.max(dt, 1e-4);
@@ -179,10 +222,12 @@ export class CatController {
       turnRate: this.turnRate,
       acceleration: this.acceleration,
       brake: this.brake,
+      gather: this.gatherWeight,
       grounded: this.grounded,
       airborne: this.airborneBlend,
       jumpProgress: this.jumpProgress(),
       landImpact: this.landImpact,
+      landRecover: this.landRecover,
       activeJumpTarget: this.committedTarget,
     };
   }
@@ -265,8 +310,6 @@ export class CatController {
     if (this.jumpBuffer > 0 && canJump) {
       this.jumpBuffer = 0;
       this.coyote = 0;
-      this.jumping = true;
-      this.jumpStartY = this.position.y;
 
       const target = this.offeredTarget;
       const ledge = target
@@ -274,21 +317,24 @@ export class CatController {
         : this.probeLedge();
 
       if (target) {
-        this.beginArc(target.landing[0], target.landing[1], target.landing[2]);
-        this.committedTarget = target;
+        this.beginGather(target.landing[0], target.landing[1], target.landing[2], target);
         return;
       }
       if (ledge && ledge.height > this.position.y + 0.06) {
         // Land just past the lip of whatever was probed.
         const reach = ledge.distance + CAT_RADIUS + 0.3;
-        this.beginArc(
+        this.beginGather(
           this.position.x + Math.sin(this.facing) * reach,
           ledge.height,
           this.position.z + Math.cos(this.facing) * reach,
+          null,
         );
         return;
       }
       {
+        // A plain hop: no ledge to commit to, so ballistics take it from here.
+        this.jumping = true;
+        this.jumpStartY = this.position.y;
         this.committedTarget = null;
         this.velocity.y = 5.4;
         const boost = Math.max(1.4, Math.hypot(this.velocity.x, this.velocity.z) * 1.12);
@@ -307,6 +353,53 @@ export class CatController {
   }
 
   /**
+   * Commits to a leap and starts the coil. The cat stays grounded and keeps its
+   * collision for the whole window; only the landing point is locked in, which
+   * is what lets the leap be aimed without giving up a guaranteed landing.
+   */
+  private beginGather(x: number, y: number, z: number, target: JumpTargetSpec | null): void {
+    this.gathering = true;
+    this.gatherElapsed = 0;
+    this.gatherLanding.set(x, y, z);
+    // Already committed, so stop offering the leap: the prompt would otherwise
+    // still be inviting a jump the cat is in the middle of.
+    this.offeredTarget = null;
+    // Commit the target now, not at launch: the camera frames it and the cat
+    // locks its gaze onto it while it is still coiling.
+    this.committedTarget = target;
+  }
+
+  /** Runs one frame of the coil. Returns true on the frame the cat launches. */
+  private advanceGather(dt: number): boolean {
+    this.gatherElapsed += dt;
+    this.gatherWeight = clamp(this.gatherElapsed / JUMP_GATHER, 0, 1);
+
+    // Kill the drift and swing round to face the landing. Turning here rather
+    // than snapping at launch is the difference between a cat aiming a jump and
+    // a cat being rotated into position by the engine.
+    const settle = 1 - Math.exp(-30 * dt);
+    this.velocity.x -= this.velocity.x * settle;
+    this.velocity.z -= this.velocity.z * settle;
+    this.velocity.y = -1.2;
+    const toLanding = Math.atan2(
+      this.gatherLanding.x - this.position.x,
+      this.gatherLanding.z - this.position.z,
+    );
+    const previous = this.facing;
+    this.facing = dampAngle(this.facing, toLanding, 22, dt);
+    this.desiredFacing = this.facing;
+    this.turnRate = shortestAngle(previous, this.facing) / Math.max(dt, 1e-4);
+
+    // Still coiling: fall through to the shared move so collision, grounding,
+    // and snapping all still apply while the cat is on the floor.
+    if (this.gatherElapsed < JUMP_GATHER) return false;
+
+    this.gathering = false;
+    this.beginArc(this.gatherLanding.x, this.gatherLanding.y, this.gatherLanding.z);
+    return true;
+  }
+
+  /**
    * Starts an authored arc to `(x, y, z)`. The cat is moved along it directly,
    * so the landing is guaranteed; the arc peak clears the destination by enough
    * that the cat visibly goes *over* the lip rather than through it.
@@ -321,16 +414,20 @@ export class CatController {
     this.arcElapsed = 0;
     this.velocity.set(0, 0, 0);
     this.grounded = false;
+    this.jumping = true;
     this.jumpStartY = this.arcStart.y;
     this.jumpPeakY = Math.max(this.arcStart.y, y) + this.arcHeight;
-    this.facing = Math.atan2(x - this.arcStart.x, z - this.arcStart.z);
-    this.desiredFacing = this.facing;
+    // The coil has already turned the cat towards the landing; do not snap the
+    // facing here. A leap the cat could not finish aiming stays slightly
+    // crabbed through the flight, which is honest and reads fine.
+    this.desiredFacing = Math.atan2(x - this.arcStart.x, z - this.arcStart.z);
     this.brake = 0;
   }
 
   /** Drives the committed arc. Returns the frame state directly. */
-  private advanceArc(dt: number): CatFrameState {
+  private advanceArc(dt: number, input: CatMoveInput): CatFrameState {
     this.arcElapsed += dt;
+    this.gatherWeight = damp(this.gatherWeight, 0, 26, dt);
     const u = clamp(this.arcElapsed / this.arcDuration, 0, 1);
     // Ease the horizontal so the cat gathers itself, then extends into the land.
     const horizontal = u * u * (3 - 2 * u);
@@ -341,6 +438,11 @@ export class CatController {
     );
     this.body.setFeetPosition(this.position);
 
+    // A leap the coil could not finish aiming keeps turning in the air, so the
+    // cat arrives facing its landing instead of crabbing onto the worktop.
+    const previousFacing = this.facing;
+    this.facing = dampAngle(this.facing, this.desiredFacing, 9, dt);
+
     const finished = u >= 1;
     if (finished) {
       this.arcDuration = 0;
@@ -349,28 +451,41 @@ export class CatController {
       this.grounded = true;
       this.coyote = COYOTE_TIME;
       this.landImpact = clamp((this.jumpPeakY - this.arcEnd.y) * 0.7, 0.2, 1);
-      this.velocity.set(0, 0, 0);
+      this.landRecover = 1;
       this.airborneBlend = 0;
+      // A cat lands into its next step, not into a full stop. How much it
+      // carries depends on whether the player is still asking to go somewhere,
+      // so releasing the stick still parks it exactly on an authored landing.
+      const drive = Math.min(1, Math.hypot(input.moveX, input.moveY));
+      const dx = this.arcEnd.x - this.arcStart.x;
+      const dz = this.arcEnd.z - this.arcStart.z;
+      const span = Math.hypot(dx, dz);
+      const exit = span > 1e-4 ? JUMP_EXIT_SPEED * drive : 0;
+      this.velocity.set((dx / (span || 1)) * exit, 0, (dz / (span || 1)) * exit);
+      this.previousSpeed = exit;
     } else {
       this.airborneBlend = 1;
+      this.previousSpeed = 0;
     }
 
-    this.turnRate = 0;
-    this.previousSpeed = 0;
+    const planarSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+    this.turnRate = shortestAngle(previousFacing, this.facing) / Math.max(dt, 1e-4);
     this.acceleration = 0;
     return {
       position: this.position,
       velocity: this.velocity,
-      planarSpeed: 0,
+      planarSpeed,
       travel: this.measureTravel(),
       facing: this.facing,
-      turnRate: 0,
+      turnRate: this.turnRate,
       acceleration: 0,
       brake: 0,
+      gather: this.gatherWeight,
       grounded: this.grounded,
       airborne: this.airborneBlend,
       jumpProgress: u,
       landImpact: this.landImpact,
+      landRecover: this.landRecover,
       activeJumpTarget: this.committedTarget,
     };
   }
@@ -426,6 +541,7 @@ export class CatController {
       if (!wasGrounded) {
         const drop = Math.max(0, this.jumpPeakY - this.position.y);
         this.landImpact = clamp(drop * 0.7, 0.15, 1);
+        this.landRecover = 1;
         this.jumping = false;
         this.committedTarget = null;
         this.velocity.y = 0;

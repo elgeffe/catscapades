@@ -900,8 +900,10 @@ export class CatscapadesGame {
     animation.brake = state.brake;
     animation.stalking = !this.completed && this.stalkRequested;
     animation.airborne = state.airborne;
+    animation.gather = state.gather;
     animation.jumpProgress = state.jumpProgress;
     animation.landImpact = state.landImpact;
+    animation.landRecover = state.landRecover;
     animation.swipe = this.swipeTimer > 0 ? 1 - this.swipeTimer / 0.42 : 0;
     animation.meow = this.meowTimer > 0 ? Math.sin((1 - this.meowTimer / 0.9) * Math.PI) : 0;
     animation.carrying = this.carrying !== null;
