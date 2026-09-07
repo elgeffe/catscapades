@@ -19,6 +19,8 @@ A desktop browser stealth-comedy MVP about an extremely innocent cat. Observe a 
 - A standalone model viewer plus headless model inspection and screenshot tooling
 - Desktop keyboard and standard gamepad controls
 - Pause/settings menu, graphics mode, independent quiet music/effects controls, local persistence, and developer diagnostics including Rapier collider wireframes
+- Surface-specific footsteps synthesised per footfall — tile is loud, a rug is nearly silent, and a loud step is a stimulus the homeowner can hear — plus distinct paw-contact, clatter, shatter and splash sounds
+- Wet and floury pawprints: walking through the overflowing sink or the punctured flour carries it, the trail fades (water dries; flour does not), and the homeowner reads it through the same vision cone and line of sight they use to spot the cat
 - Procedural primitive art; no external assets
 - Relative Vite base path, suitable for GitHub Pages builds
 
@@ -111,6 +113,8 @@ The camera is authored by zone. Each zone provides a fixed composition, a target
 | Physics | `src/physics/physics-world.ts` (Rapier world, character controller, dynamic bodies, ledge probe) |
 | Cat locomotion | `src/cat/cat-controller.ts` |
 | Homeowner perception | `src/core/perception.ts` |
+| Footstep surfaces | `src/core/surfaces.ts` |
+| Pawprint trail | `src/core/paw-trail.ts` |
 | Animation | `src/anim/cat-animator.ts`, `src/anim/leg-ik.ts`, `src/anim/owner-animator.ts` |
 | Camera | `src/camera/camera-director.ts` |
 | Models | `src/models/` — `cat.ts`, `cat-geometry.ts`, `owner.ts`, `furniture.ts`, `props.ts`, `materials.ts`, `registry.ts`, `inspect.ts` |

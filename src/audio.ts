@@ -1,3 +1,4 @@
+import type { SurfaceVoice } from "./core/surfaces";
 const MUSIC_MIX = 0.18;
 const TRACK_BEATS = 32;
 const SECONDS_PER_BEAT = 60 / 112;
@@ -180,6 +181,131 @@ export class TinyAudio {
     filter.Q.value = 0.7;
     gain.gain.setValueAtTime(0.22, now);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+    source.connect(filter).connect(gain).connect(this.getEffectsOutput(ctx));
+    source.start(now);
+  }
+
+  /**
+   * A single footfall on a named surface.
+   *
+   * Steps are the game's most frequent sound, so they are synthesised from two
+   * cheap parts rather than sampled: a filtered noise burst for the pad, and a
+   * short click for the claw. The surface picks the balance, which is what
+   * makes tile obviously louder than a rug — the difference the player is
+   * meant to be routing around.
+   */
+  step(voice: SurfaceVoice, weight = 1): void {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const level = 0.075 * voice.loudness * Math.max(0, Math.min(1.4, weight));
+    if (level < 0.0015) return;
+
+    const length = Math.max(16, Math.floor(ctx.sampleRate * 0.05));
+    const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let index = 0; index < length; index += 1) {
+      // A softer surface decays slower and less sharply: a brush, not a tap.
+      const shape = Math.pow(1 - index / length, 1 + (1 - voice.softness) * 6);
+      data[index] = (Math.random() * 2 - 1) * shape;
+    }
+    const source = ctx.createBufferSource();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    source.buffer = buffer;
+    filter.type = voice.softness > 0.6 ? "lowpass" : "bandpass";
+    filter.frequency.value = voice.tone;
+    filter.Q.value = 0.6 + (1 - voice.softness) * 1.4;
+    // Slight random detune so a walk cycle does not turn into a metronome.
+    filter.frequency.value *= 0.88 + Math.random() * 0.24;
+    gain.gain.setValueAtTime(level, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.05 + voice.softness * 0.06);
+    source.connect(filter).connect(gain).connect(this.getEffectsOutput(ctx));
+    source.start(now);
+  }
+
+  /**
+   * A paw meeting an object. `hardness` runs from a felt mouse to a kettle,
+   * and is what tells the player their swipe connected with something solid
+   * rather than something that was going to fly away anyway.
+   */
+  tap(hardness: number, weight = 1): void {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const hard = Math.max(0, Math.min(1, hardness));
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    oscillator.type = hard > 0.5 ? "square" : "sine";
+    const pitch = 180 + hard * 520;
+    oscillator.frequency.setValueAtTime(pitch, now);
+    oscillator.frequency.exponentialRampToValueAtTime(pitch * 0.55, now + 0.09);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.05 + hard * 0.09, now + 0.006);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.1 + hard * 0.12);
+    const filter = ctx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 900 + hard * 2600;
+    oscillator.connect(filter).connect(gain).connect(this.getEffectsOutput(ctx));
+    oscillator.start(now);
+    oscillator.stop(now + 0.26);
+    void weight;
+  }
+
+  /**
+   * Crockery breaking. Distinct from `crash` on purpose: a mug shattering is
+   * the loudest, most incriminating event in the game and should not sound
+   * like a book falling over.
+   */
+  shatter(): void {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const length = Math.floor(ctx.sampleRate * 0.5);
+    const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let index = 0; index < length; index += 1) {
+      const t = index / length;
+      // A sharp burst, then a scatter of smaller pieces settling.
+      const body = Math.pow(1 - t, 5);
+      const scatter = t > 0.12 ? Math.pow(1 - t, 1.6) * (Math.random() < 0.06 ? 1 : 0.12) : 0;
+      data[index] = (Math.random() * 2 - 1) * (body + scatter * 0.7);
+    }
+    const source = ctx.createBufferSource();
+    const highs = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    source.buffer = buffer;
+    highs.type = "highpass";
+    highs.frequency.value = 1800;
+    gain.gain.setValueAtTime(0.3, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.55);
+    source.connect(highs).connect(gain).connect(this.getEffectsOutput(ctx));
+    source.start(now);
+  }
+
+  /** Something landing in water. */
+  splash(): void {
+    const ctx = this.getContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const length = Math.floor(ctx.sampleRate * 0.32);
+    const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let index = 0; index < length; index += 1) {
+      const t = index / length;
+      data[index] = (Math.random() * 2 - 1) * Math.pow(1 - t, 2.2);
+    }
+    const source = ctx.createBufferSource();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    source.buffer = buffer;
+    filter.type = "bandpass";
+    filter.frequency.setValueAtTime(700, now);
+    // Sweeping the band upwards is what turns a noise burst into a splash.
+    filter.frequency.exponentialRampToValueAtTime(2600, now + 0.3);
+    filter.Q.value = 1.1;
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.34);
     source.connect(filter).connect(gain).connect(this.getEffectsOutput(ctx));
     source.start(now);
   }

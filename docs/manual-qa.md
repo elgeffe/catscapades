@@ -24,5 +24,11 @@
 - [ ] Hook the cupboard open, then let the homeowner reach it, and confirm they react and leave your preparation standing.
 - [ ] Get caught and watch the whole sequence: picked up, carried, put down in the garden — no teleport.
 - [ ] Stand still and watch them idle: they should shift weight and breathe, not freeze.
+- [ ] Walk the same route across tile, a rug, the wooden dining floor and the garden grass, and confirm each sounds clearly different.
+- [ ] Scamper across bare tile near the homeowner and confirm the noise alone raises suspicion; repeat while stalking and confirm it does not.
+- [ ] Swipe a light and a heavy prop and confirm the contact sounds different; break the mug and confirm the shatter is distinct from a clatter.
+- [ ] Drop a carried item into the running sink and confirm the splash.
+- [ ] Let the sink overflow, walk through the puddle, and confirm wet pawprints appear, fade over time, and draw the homeowner when they see them.
+- [ ] Shred the flour bag, walk through it, and confirm the floury tracks last far longer and are noticed from further away.
 - [ ] Toggle diagnostics with backquote and inspect coordinates, NPC state, camera zone, the vision cone, and render statistics.
 - [ ] Preview `dist/` and smoke-test the deployed GitHub Pages URL and reload.

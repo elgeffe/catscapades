@@ -22,9 +22,12 @@ import { OwnerAnimator } from "./anim/owner-animator";
 import { PhysicsWorld, type CharacterBody, type DynamicBody } from "./physics/physics-world";
 import { buildLevel, type LevelHandles } from "./level/level-builder";
 import {
-  OWNER_ROUTINE, POINTS_OF_INTEREST, PROPS, SINK_BASIN, SPAWN, STATIONS, WORLD,
+  FLOORS, OWNER_ROUTINE, PLACEMENTS, POINTS_OF_INTEREST, PROPS, SINK_BASIN, SPAWN,
+  STATIONS, WORLD,
   type PropSpec, type RoutineStop, type StationSpec,
 } from "./level/level-data";
+import { SURFACE_VOICES, surfaceAt, type SurfaceKind, type SurfaceRegion } from "./core/surfaces";
+import { COATINGS, PawTrail, type PawCoating } from "./core/paw-trail";
 import { CameraDirector } from "./camera/camera-director";
 import { CatController, type CatFrameState } from "./cat/cat-controller";
 
@@ -52,6 +55,8 @@ interface LiveProp {
   readonly restOffset: number;
   readonly mass: number;
   broken: boolean;
+  /** True while it is already noisily in motion, so one tumble is one sound. */
+  clattering: boolean;
   settledHeight: number;
 }
 
@@ -64,6 +69,9 @@ const BITE_DURATION = 0.46;
 const BITE_CONTACT = 0.6;
 /** How long the homeowner spends picking the cat up and carrying it out. */
 const CATCH_DURATION = 2.2;
+
+/** The kitchen tile, which prints fade back towards as they dry or scatter. */
+const FLOOR_TONE = new THREE.Color(0xe4e0d4);
 
 const FIXED_STEP = 1 / 60;
 /**
@@ -148,6 +156,39 @@ export class CatscapadesGame {
   private ownerHolding: string | null = null;
   /** Disturbances already reacted to, so each is an event and not a stream. */
   private readonly noticedDisturbances = new Set<string>();
+  /**
+   * Where each surface is, built from the same authored floor and rug
+   * rectangles the level is drawn from, so what the player hears underfoot and
+   * what they can see agree by construction.
+   */
+  private readonly surfaces: SurfaceRegion[] = [
+    ...FLOORS.map((floor) => ({
+      kind: (floor.kind === "flat" ? "tile" : floor.kind) as SurfaceKind,
+      center: floor.center,
+      size: floor.size,
+      priority: 0,
+    })),
+    ...PLACEMENTS.filter((placement) => placement.model === "rug").map((rug) => ({
+      kind: "rug" as SurfaceKind,
+      center: [rug.position[0], rug.position[2]] as const,
+      size: (rug.size ?? [2, 2]) as readonly [number, number],
+      priority: 1,
+    })),
+    // Anything the cat has climbed onto is a hard, resonant surface.
+    {
+      kind: "worktop" as SurfaceKind,
+      center: [WORLD.minX + (WORLD.maxX - WORLD.minX) / 2, 0] as const,
+      size: [WORLD.maxX - WORLD.minX, WORLD.maxZ - WORLD.minZ] as const,
+      priority: 2,
+      minHeight: 0.6,
+    },
+  ];
+  private readonly trail = new PawTrail();
+  private trailDecals: THREE.InstancedMesh | null = null;
+  private readonly decalMatrix = new THREE.Matrix4();
+  private readonly decalColor = new THREE.Color();
+  /** Set when the homeowner has been drawn to a trail, so it fires once. */
+  private noticedTrailAt = -Infinity;
   /** Sight sample points on the cat, reused every frame. */
   private readonly sightSamples = [
     new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(),
@@ -325,6 +366,7 @@ export class CatscapadesGame {
    */
   debugTeleport(x: number, z: number, y = 1.2): void {
     this.controller.teleport(this.scratchVector.set(x, y, z));
+    this.trail.clear();
     this.catAnimator.resetSecondaryMotion();
     this.catTravel = 0;
     this.director.updateZone(x, z);
@@ -368,6 +410,16 @@ export class CatscapadesGame {
       cameraZone: this.director.currentZoneId(),
       carrying: this.carrying?.spec.id ?? null,
       preparations: [...this.preparations],
+      surface: surfaceAt(
+        this.surfaces,
+        this.catState?.position.x ?? 0,
+        this.catState?.position.z ?? 0,
+        this.catState?.position.y ?? 0,
+      ),
+      trail: {
+        paws: this.trail.carrying()?.kind ?? null,
+        prints: this.trail.prints().length,
+      },
       mugBroken: this.mugBroken,
       ownerState: this.ownerState,
       ownerSight: {
@@ -706,8 +758,11 @@ export class CatscapadesGame {
     away.normalize().multiplyScalar(prop.mass * launch);
     away.y = prop.mass * launch * 0.55;
     prop.body.applyImpulse(away, prop.mass * launch * 0.22);
-    this.audio.crash();
-    this.emitStimulus(this.scratchVector, 1.1, "swipe");
+    // The contact itself, pitched by how solid the thing was. Heavier objects
+    // both sound heavier and make more noise for the homeowner to hear.
+    const hardness = smoothstep(0.03, 0.55, prop.mass);
+    this.audio.tap(hardness, 1);
+    this.emitStimulus(this.scratchVector, 0.7 + hardness * 0.6, "swipe");
   }
 
   private dropCarried(target?: "sink"): void {
@@ -725,6 +780,7 @@ export class CatscapadesGame {
     }
     prop.body.teleport(this.scratchVector);
 
+    if (target === "sink") this.audio.splash();
     if (prop.spec.id === "sock" && target === "sink") {
       this.completeObjective("sock-sink", "Sock soup. An ambitious new recipe.");
       return;
@@ -793,8 +849,12 @@ export class CatscapadesGame {
       if (prop.spec.fragile && this.scratchVector.y < prop.settledHeight - 0.55 && prop.body.speed() < 0.6) {
         this.breakProp(prop);
       }
-      if (!prop.spec.fragile && prop.body.speed() > 2.4) {
-        this.emitStimulus(this.scratchVector, 0.8, "crash");
+      if (!prop.spec.fragile && prop.body.speed() > 2.4 && !prop.clattering) {
+        prop.clattering = true;
+        this.audio.tap(smoothstep(0.03, 0.55, prop.mass), 1.3);
+        this.emitStimulus(this.scratchVector, 0.5 + smoothstep(0.03, 0.6, prop.mass) * 0.7, "crash");
+      } else if (prop.body.speed() < 0.8) {
+        prop.clattering = false;
       }
     }
   }
@@ -806,7 +866,9 @@ export class CatscapadesGame {
     const shards = buildMugShards().object;
     shards.position.set(this.scratchVector.x, Math.max(0.02, this.scratchVector.y - 0.1), this.scratchVector.z);
     this.scene.add(shards);
-    this.audio.crash();
+    // A mug shattering is the loudest, most incriminating event in the game.
+    // It should not sound like a book falling over.
+    this.audio.shatter();
     this.emitStimulus(this.scratchVector, 2.2, "crash");
     this.showToast("CRASH. That mug had been in the family for weeks.");
 
@@ -861,6 +923,11 @@ export class CatscapadesGame {
       (from, to) => this.physics.hasLineOfSight(from, to),
     );
 
+    // A trail is evidence, and the homeowner can read it. Notice the most
+    // conspicuous print they can actually see rather than the nearest one, so
+    // a fresh line of flour registers where one faint wet mark does not.
+    this.noticeTrail(dt);
+
     if (this.ownerSight.visible) {
       const seen = this.ownerSight.at ?? cat;
       if (this.ownerHasLastSeen) {
@@ -875,6 +942,47 @@ export class CatscapadesGame {
     } else {
       this.ownerLastSeenAge += dt;
     }
+  }
+
+  /**
+   * The homeowner spotting pawprints.
+   *
+   * This is what makes the trail a consequence rather than a decoration: the
+   * cheapest route across a room stops being the safest one the moment the
+   * room is wet, and puncturing the flour bag becomes a commitment because
+   * flour does not dry.
+   */
+  private noticeTrail(dt: number): void {
+    if (this.ownerState === "pursuing" || this.elapsed - this.noticedTrailAt < 12) return;
+    const print = this.trail.strongestNear(
+      this.ownerPosition.x, this.ownerPosition.z, OWNER_SIGHT.range * 0.55,
+    );
+    if (!print) return;
+
+    this.scratchVector.set(print.x, print.y + 0.02, print.z);
+    const sight = evaluateSight(
+      OWNER_SIGHT,
+      {
+        from: this.ownerPosition,
+        facing: this.ownerFacing,
+        targets: [this.scratchVector],
+        // A mark on the floor does not move and is not hiding; it is simply
+        // small, which the conspicuousness of its coating already accounts for.
+        stillness: 0,
+        concealment: 1 - COATINGS[print.kind].conspicuousness * PawTrail.opacity(print),
+      },
+      (from, to) => this.physics.hasLineOfSight(from, to),
+    );
+    if (!sight.visible || sight.clarity < 0.16) return;
+
+    this.noticedTrailAt = this.elapsed;
+    this.suspicion = Math.min(100, this.suspicion + 18 + sight.clarity * 16);
+    this.ownerSurprise = Math.max(this.ownerSurprise, 0.7);
+    this.emitStimulus(this.scratchVector, 0.95, "swipe");
+    this.showToast(print.kind === "water"
+      ? "They have found a trail of damp little footprints."
+      : "A line of floury pawprints. Extremely incriminating.");
+    void dt;
   }
 
   private updateOwner(dt: number): void {
@@ -1313,6 +1421,9 @@ export class CatscapadesGame {
     this.pending = null;
     this.swipeTimer = 0;
     this.biteTimer = 0;
+    // Carried out with wet paws or not, the cat stops adding to the evidence.
+    // What is already on the floor stays there.
+    this.trail.dryPaws();
     this.showToast("Scooped up. There is no dignified way out of this.");
   }
 
@@ -1412,6 +1523,7 @@ export class CatscapadesGame {
     );
     animation.lookAt = this.resolveLookTarget(state.position);
     this.catAnimator.update(dt, animation);
+    this.updateFootfalls(state, dt);
 
     this.ownerAnimator.update(dt, {
       speed: this.ownerSpeed,
@@ -1450,6 +1562,121 @@ export class CatscapadesGame {
       this.carrying.object.position.lerp(this.scratchVector, settle);
       this.carrying.object.quaternion.slerp(this.scratchQuaternion, settle);
     }
+  }
+
+  /**
+   * Footfalls: the sound of each paw landing, and whatever it leaves behind.
+   *
+   * The stride clock already knows exactly when a paw takes the ground, so
+   * both the step sound and the pawprint hang off that rather than off a
+   * timer. That is what keeps them in step with the legs at every speed, and
+   * silent when the cat is pressed against a cupboard going nowhere.
+   */
+  private updateFootfalls(state: CatFrameState, dt: number): void {
+    this.trail.update(dt);
+    if (this.trailDecals) this.refreshTrailDecals();
+    this.pickUpCoating(state);
+
+    const stalking = this.stalkRequested;
+    this.cat.legs.forEach((leg, index) => {
+      if (!this.catAnimator.footPlanted(index)) return;
+      leg.paw.getWorldPosition(this.scratchVector);
+      const kind = surfaceAt(
+        this.surfaces, this.scratchVector.x, this.scratchVector.z, this.scratchVector.y,
+      );
+      const voice = SURFACE_VOICES[kind];
+      // A stalking cat places its paws deliberately and quietly; a scampering
+      // one does not. This is the whole reason to hold Ctrl.
+      const weight = (stalking ? 0.34 : 0.6 + smoothstep(0.4, 5, state.planarSpeed) * 0.7)
+        * (leg.isFront ? 1 : 0.88);
+      this.audio.step(voice, weight);
+
+      // Loud footfalls carry. A cat crossing bare tile at a run is a stimulus;
+      // the same cat creeping over a rug is not.
+      const noise = voice.loudness * weight;
+      if (noise > 0.62 && this.ownerState === "routine") {
+        this.suspicion = Math.min(100, this.suspicion + noise * 1.4);
+      }
+
+      const print = this.trail.plant(
+        this.scratchVector.x, this.scratchVector.y, this.scratchVector.z, state.facing,
+      );
+      if (print) this.spawnTrailDecal();
+    });
+  }
+
+  /**
+   * Draws the trail.
+   *
+   * One instanced quad pool, refreshed whenever a print is added or ages out.
+   * Per-instance opacity would need a custom shader, so a print fades by
+   * shrinking and by having its colour walked towards the floor it sits on —
+   * which is also roughly what a drying puddle actually does.
+   */
+  private spawnTrailDecal(): void {
+    if (!this.trailDecals) {
+      const geometry = new THREE.CircleGeometry(0.055, 10);
+      geometry.rotateX(-Math.PI / 2);
+      const material = new THREE.MeshBasicMaterial({
+        transparent: true, opacity: 0.62, depthWrite: false, vertexColors: false,
+      });
+      this.trailDecals = new THREE.InstancedMesh(geometry, material, 48);
+      this.trailDecals.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      this.trailDecals.frustumCulled = false;
+      this.trailDecals.renderOrder = 2;
+      this.scene.add(this.trailDecals);
+    }
+    this.refreshTrailDecals();
+  }
+
+  private refreshTrailDecals(): void {
+    const mesh = this.trailDecals;
+    if (!mesh) return;
+    const prints = this.trail.prints();
+    mesh.count = Math.min(prints.length, mesh.instanceMatrix.count);
+    for (let index = 0; index < mesh.count; index += 1) {
+      const print = prints[index]!;
+      const opacity = PawTrail.opacity(print);
+      const scale = 0.5 + opacity * 0.75;
+      this.decalMatrix.makeRotationY(print.facing);
+      this.decalMatrix.scale(this.scratchVector.set(scale, 1, scale * 1.25));
+      this.decalMatrix.setPosition(print.x, Math.max(0.012, print.y - 0.002), print.z);
+      mesh.setMatrixAt(index, this.decalMatrix);
+      // Water darkens the floor; flour whitens it. Both walk back towards the
+      // floor's own tone as they fade.
+      this.decalColor.setHex(print.kind === "water" ? 0x4a5a63 : 0xf4f0e6);
+      this.decalColor.lerp(FLOOR_TONE, 1 - opacity);
+      mesh.setColorAt(index, this.decalColor);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }
+
+  /** Standing in something wet or floury coats the paws. */
+  private pickUpCoating(state: CatFrameState): void {
+    if (!state.grounded) return;
+    let picked: PawCoating | null = null;
+    if (this.level.puddle.visible) {
+      const puddle = this.level.puddle.getWorldPosition(this.scratchVectorB);
+      // The puddle grows as the sink overflows, so its reach grows with it.
+      const reach = 0.5 + this.level.puddle.scale.x * 0.55;
+      if (Math.hypot(state.position.x - puddle.x, state.position.z - puddle.z) < reach) {
+        picked = "water";
+      }
+    }
+    if (!picked && this.preparations.has("flour")) {
+      const flour = STATIONS.find((station) => station.id === "flour");
+      // No height gate: a punctured sack puts flour on the worktop *and* on
+      // the floor under it, so both routes past it coat the paws. Gating it to
+      // the worktop would make the tracks reachable only by the cats that had
+      // already climbed up there.
+      if (flour && Math.hypot(
+        state.position.x - flour.position[0], state.position.z - flour.position[2],
+      ) < 1.75) {
+        picked = "flour";
+      }
+    }
+    if (picked) this.trail.coat(picked);
   }
 
   /**
@@ -1547,6 +1774,8 @@ export class CatscapadesGame {
       + `  last seen ${this.ownerHasLastSeen ? `${this.ownerLastSeenAge.toFixed(1)}s ago` : "never"}`,
       `Camera       ${this.director.currentZoneId()}`,
       `Preparations ${this.preparations.size}`,
+      `Surface      ${surfaceAt(this.surfaces, state?.position.x ?? 0, state?.position.z ?? 0, state?.position.y ?? 0)}`
+      + `  paws ${this.trail.carrying()?.kind ?? "clean"}  prints ${this.trail.prints().length}`,
       `Awake bodies ${this.physics.activeBodyCount()}/${this.physics.bodies().length}`,
       `Catastrophe  ${this.catastrophe ? "triggered" : "pending"}`,
     ].join("\n");
@@ -1711,6 +1940,7 @@ export class CatscapadesGame {
         restOffset: built.restOffset,
         mass: built.mass,
         broken: false,
+        clattering: false,
         settledHeight: spec.position[1],
       });
     }
