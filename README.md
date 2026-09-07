@@ -4,7 +4,7 @@ A desktop browser stealth-comedy MVP about an extremely innocent cat. Observe a 
 
 ## Included
 
-- A fully rigged cat with a continuous skinned torso, seam-free two-bone neck/head skin, socket-to-tip tail skin, socket-anchored digitigrade limb skins with level terminal paws, integrated pinnae, invisible scapula timing anchors, expressive pupils and eyelids, four blended gaits, gaze stabilisation, and authored pose states
+- A fully rigged tabby cat with a curved skinned torso, a short muzzle and recessed almond eyes, cupped ears, tapered digitigrade limbs with buried shoulder/hip joins, padded paws, and a continuous tail; expressive pupils and eyelids, four blended gaits, gaze stabilisation, and authored pose states
 - Rapier 3D physics: a kinematic character controller for the cat and homeowner, dynamic rigid bodies for every swipeable prop, and real vertical traversal
 - Contextual leaps onto authored ledges — chair to table, floor to worktop to wall shelf, planter, box, sideboard, washing machine — plus a forward ledge probe so unauthored geometry is climbable too
 - Four authored semi-fixed camera compositions, including utility-nook coverage, with dead zones, look-ahead, FOV blending, separated movement-basis blending, and transition hysteresis

@@ -167,7 +167,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     id: "cat",
     label: "Cat (player)",
     category: "character",
-    description: "Skinned cat with continuous torso, seam-free neck/head, socket-anchored limbs, and socket-to-tip tail surfaces, plus level paws and an expressive face.",
+    description: "Skinned tabby cat with a curved torso, buried limb sockets, padded paws, continuous tail, and a short muzzle with recessed almond eyes and cupped ears.",
     instantiate: () => {
       const rig = buildCat();
       return { object: rig.root, driver: new CatDriver(new CatAnimator(rig)) };

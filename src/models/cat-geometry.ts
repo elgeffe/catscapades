@@ -20,6 +20,9 @@ export interface CatLimbShape {
 }
 
 export interface CatLegShape {
+  readonly side: -1 | 1;
+  /** Distance over which the proximal skin emerges from inside the torso. */
+  readonly socketBlend: number;
   readonly upper: CatLimbShape;
   readonly lower: CatLimbShape;
   readonly foot: CatLimbShape;
@@ -65,16 +68,16 @@ export function buildCatTorsoGeometry(colors: CatCoatColors): THREE.BufferGeomet
     { z: 0.03, width: 0.106, height: 0.109, centerY: 0.038, lowerTaper: 0.22 },
     // Deep, laterally narrow ribcage and raised withers.
     { z: 0.085, width: 0.113, height: 0.118, centerY: 0.032, lowerTaper: 0.2 },
-    { z: 0.14, width: 0.125, height: 0.135, centerY: 0.026, lowerTaper: 0.16 },
-    { z: 0.19, width: 0.132, height: 0.143, centerY: 0.025, lowerTaper: 0.12 },
-    { z: 0.235, width: 0.13, height: 0.14, centerY: 0.035, lowerTaper: 0.1 },
+    { z: 0.14, width: 0.121, height: 0.126, centerY: 0.028, lowerTaper: 0.16 },
+    { z: 0.19, width: 0.129, height: 0.134, centerY: 0.03, lowerTaper: 0.12 },
+    { z: 0.235, width: 0.128, height: 0.135, centerY: 0.037, lowerTaper: 0.1 },
     { z: 0.275, width: 0.116, height: 0.128, centerY: 0.04 },
     { z: 0.31, width: 0.103, height: 0.11, centerY: 0.046 },
     { z: 0.34, width: 0.079, height: 0.086, centerY: 0.059 },
   ];
   const anchors = [-0.235, -0.08, 0.075, 0.21] as const;
   return buildLoft(
-    sections,
+    softenLoft(sections),
     20,
     (section, angle) => sampleTorsoColor(colors, section.z, angle),
     (z) => weightsAlong(z, anchors),
@@ -96,15 +99,15 @@ export function buildCatNeckHeadGeometry(colors: CatCoatColors): THREE.BufferGeo
     { z: 0, width: 0.08, height: 0.075, centerY: 0.006 },
     { z: 0.02, width: 0.084, height: 0.078, centerY: 0.019 },
     // Occiput and crown rise above the throat without a detachable-head seam.
-    { z: 0.04, width: 0.088, height: 0.087, centerY: 0.074, lowerTaper: 0.08 },
-    { z: 0.08, width: 0.106, height: 0.098, centerY: 0.078, lowerTaper: 0.1 },
-    { z: 0.125, width: 0.108, height: 0.094, centerY: 0.073, lowerTaper: 0.13 },
+    { z: 0.04, width: 0.086, height: 0.079, centerY: 0.064, lowerTaper: 0.08 },
+    { z: 0.08, width: 0.099, height: 0.085, centerY: 0.069, lowerTaper: 0.1 },
+    { z: 0.125, width: 0.101, height: 0.079, centerY: 0.067, lowerTaper: 0.15 },
     // Full cheeks turn into a broad, short facial plane. The final rings stay
     // close together in depth, avoiding the fox-like wedge of a long muzzle.
-    { z: 0.16, width: 0.102, height: 0.078, centerY: 0.061, lowerTaper: 0.14 },
-    { z: 0.19, width: 0.09, height: 0.063, centerY: 0.052, lowerTaper: 0.16 },
-    { z: 0.208, width: 0.071, height: 0.048, centerY: 0.043, lowerTaper: 0.18 },
-    { z: 0.216, width: 0.062, height: 0.041, centerY: 0.04, lowerTaper: 0.18 },
+    { z: 0.16, width: 0.098, height: 0.066, centerY: 0.061, lowerTaper: 0.2 },
+    { z: 0.19, width: 0.083, height: 0.053, centerY: 0.053, lowerTaper: 0.23 },
+    { z: 0.208, width: 0.058, height: 0.035, centerY: 0.04, lowerTaper: 0.16 },
+    { z: 0.216, width: 0.047, height: 0.028, centerY: 0.035, lowerTaper: 0.08 },
   ];
   return buildLoft(
     sections,
@@ -203,10 +206,13 @@ export function buildCatEarGeometry(): THREE.BufferGeometry {
     0.001, 0.084, -0.008,
     -0.001, 0.084, -0.008,
     -0.012, 0.068, -0.006,
+    // The bowl recedes behind its rolled rim instead of filling it with a
+    // flat triangle. Its depth is shared by the inset skin surface below.
+    0, 0.027, 0.0015,
   ]);
   const indices = [
     // Front and back faces.
-    0, 1, 2, 0, 2, 5, 5, 2, 3, 5, 3, 4,
+    12, 0, 1, 12, 1, 2, 12, 2, 3, 12, 3, 4, 12, 4, 5, 12, 5, 0,
     6, 8, 7, 6, 11, 8, 11, 9, 8, 11, 10, 9,
     // Outer rolled edges and closed root.
     0, 6, 7, 0, 7, 1,
@@ -223,17 +229,26 @@ export function buildCatEarGeometry(): THREE.BufferGeometry {
   return geometry;
 }
 
-/** Inset front plane leaves a visible fur rim around the pinna. */
+/** The inset bowl follows the pinna's cup and leaves a visible fur rim. */
 export function buildCatEarInnerGeometry(): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute([
-    -0.031, -0.002, 0.018,
-    0.031, -0.002, 0.018,
-    0.009, 0.057, 0.011,
-    0, 0.071, 0.008,
-    -0.009, 0.057, 0.011,
+    -0.031, -0.002, 0.014,
+    0.031, -0.002, 0.014,
+    0.009, 0.057, 0.008,
+    0, 0.071, 0.006,
+    -0.009, 0.057, 0.008,
+    0, 0.027, 0.003,
   ], 3));
-  geometry.setIndex([0, 1, 2, 0, 2, 4, 4, 2, 3]);
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute([
+    0.9, 0.9, 0.9,
+    0.9, 0.9, 0.9,
+    1, 1, 1,
+    1, 1, 1,
+    1, 1, 1,
+    0.68, 0.68, 0.68,
+  ], 3));
+  geometry.setIndex([5, 0, 1, 5, 1, 2, 5, 2, 3, 5, 3, 4, 5, 4, 0]);
   geometry.computeVertexNormals();
   return geometry;
 }
@@ -268,11 +283,11 @@ export function buildCatLegGeometry(
   shape: CatLegShape,
   colors: CatCoatColors,
 ): THREE.BufferGeometry {
-  const radialSegments = 12;
+  const radialSegments = 16;
   const upperEnd = shape.upper.length;
   const lowerEnd = upperEnd + shape.lower.length;
   const fullLength = lowerEnd + shape.foot.length;
-  const blend = 0.018;
+  const blend = 0.025;
   const sections: Array<{ distance: number; width: number; depth: number; segment: 0 | 1 | 2; t: number }> = [];
   const add = (
     distance: number,
@@ -286,9 +301,8 @@ export function buildCatLegGeometry(
 
   // Bury the cap above the anatomical pivot so flexion never reveals a flat
   // cut at the shoulder or hip.
-  add(-0.048, shape.upper.root[0] * 0.55, shape.upper.root[1] * 0.62, 0, 0);
-  add(0, shape.upper.root[0] * 0.78, shape.upper.root[1] * 0.86, 0, 0);
-  add(shape.upper.length * 0.1, shape.upper.root[0] * 0.9, shape.upper.root[1] * 0.96, 0, 0.1);
+  add(-0.048, shape.upper.root[0] * 0.38, shape.upper.root[1] * 0.58, 0, 0);
+  add(0, shape.upper.root[0] * 0.86, shape.upper.root[1], 0, 0);
   const earlyMuscleBlend = Math.min(1, 0.16 / Math.max(0.01, shape.upper.muscleAt));
   add(
     shape.upper.length * 0.16,
@@ -319,13 +333,15 @@ export function buildCatLegGeometry(
     0.72,
   );
   add(upperEnd - blend, shape.upper.joint[0], shape.upper.joint[1], 0, 0.94);
+  add(upperEnd - blend * 0.45, shape.upper.joint[0], shape.upper.joint[1] * 1.08, 0, 0.97);
   add(
     upperEnd,
     (shape.upper.joint[0] + shape.lower.root[0]) * 0.48,
-    (shape.upper.joint[1] + shape.lower.root[1]) * 0.48,
+    (shape.upper.joint[1] + shape.lower.root[1]) * 0.55,
     1,
     0,
   );
+  add(upperEnd + blend * 0.45, shape.lower.root[0], shape.lower.root[1] * 1.08, 1, 0.04);
   add(upperEnd + blend, shape.lower.root[0], shape.lower.root[1], 1, 0.08);
   add(
     upperEnd + shape.lower.length * shape.lower.muscleAt,
@@ -352,11 +368,11 @@ export function buildCatLegGeometry(
   add(
     lowerEnd,
     (shape.lower.joint[0] + shape.foot.root[0]) * 0.48,
-    (shape.lower.joint[1] + shape.foot.root[1]) * 0.48,
+    (shape.lower.joint[1] + shape.foot.root[1]) * 0.52,
     2,
     0,
   );
-  add(lowerEnd + blend * 0.8, shape.foot.root[0], shape.foot.root[1], 2, 0.12);
+  add(lowerEnd + blend * 0.5, shape.foot.root[0], shape.foot.root[1], 2, 0.12);
   add(
     lowerEnd + shape.foot.length * shape.foot.muscleAt,
     shape.foot.muscle[0],
@@ -397,12 +413,16 @@ export function buildCatLegGeometry(
     );
     for (let radial = 0; radial < radialSegments; radial += 1) {
       const angle = radial / radialSegments * Math.PI * 2;
+      // Proximal rings turn inward into the ribcage rather than ending in an
+      // exposed vertical cap on its outside. Both sides use the same profile,
+      // mirrored toward the centreline, while the stationary socket owns it.
+      const socketInset = (1 - smoothstep(-0.048, shape.socketBlend, section.distance)) * 0.064;
       positions.push(
-        Math.cos(angle) * section.width,
+        Math.cos(angle) * section.width - shape.side * socketInset,
         -section.distance,
         Math.sin(angle) * section.depth,
       );
-      const color = fur.clone().lerp(shade, stripe * 0.42);
+      const color = fur.clone().lerp(shade, stripe * 0.28);
       vertexColors.push(color.r, color.g, color.b);
       skinIndices.push(...skin.indices);
       skinWeights.push(...skin.weights);
@@ -425,7 +445,7 @@ export function buildCatLegGeometry(
     }
   }
   const topCenter = positions.length / 3;
-  positions.push(0, -(sections[0]?.distance ?? 0), 0);
+  positions.push(-shape.side * 0.064, -(sections[0]?.distance ?? 0), 0);
   vertexColors.push(fur.r, fur.g, fur.b);
   skinIndices.push(0, 0, 0, 0);
   skinWeights.push(1, 0, 0, 0);
@@ -456,9 +476,9 @@ export function buildCatPawGeometry(
   colors: CatCoatColors,
   isFront: boolean,
 ): THREE.BufferGeometry {
-  const geometry = new THREE.SphereGeometry(1, 12, 7);
-  geometry.scale(isFront ? 0.032 : 0.035, isFront ? 0.018 : 0.019, isFront ? 0.041 : 0.046);
-  geometry.translate(0, isFront ? 0.019 : 0.02, isFront ? 0.017 : 0.02);
+  const geometry = new THREE.SphereGeometry(1, 16, 8);
+  geometry.scale(isFront ? 0.035 : 0.036, isFront ? 0.026 : 0.027, isFront ? 0.044 : 0.047);
+  geometry.translate(0, isFront ? 0.021 : 0.022, isFront ? 0.015 : 0.018);
 
   const position = geometry.getAttribute("position");
   const vertexColors: number[] = [];
@@ -472,7 +492,10 @@ export function buildCatPawGeometry(
     const grooveX = isFront ? 0.0105 : 0.0115;
     const leftGroove = Math.exp(-Math.pow((x + grooveX) / 0.0036, 2));
     const rightGroove = Math.exp(-Math.pow((x - grooveX) / 0.0036, 2));
-    position.setY(index, y - toe * (leftGroove + rightGroove) * 0.0017);
+    // A broad pad bears the weight; the raised instep swallows the ankle end.
+    // Toe clefts are shallow depressions in one skin, never separate beads.
+    position.setY(index, Math.max(0.001, y - toe * (leftGroove + rightGroove) * 0.003));
+    position.setZ(index, z - toe * (leftGroove + rightGroove) * 0.0025);
     const color = fur.clone().lerp(shade, toe * 0.1);
     vertexColors.push(color.r, color.g, color.b);
   }
@@ -557,6 +580,16 @@ function buildLoft(
     indices.push(endCenter, lastRow + radial, lastRow + next);
   }
 
+  // The tail is authored from its socket backwards along -Z. Reverse its
+  // winding so the coat faces outwards just like an ascending torso loft.
+  if (last.z < first.z) {
+    for (let index = 0; index < indices.length; index += 3) {
+      const second = indices[index + 1]!;
+      indices[index + 1] = indices[index + 2]!;
+      indices[index + 2] = second;
+    }
+  }
+
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
   geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
@@ -567,6 +600,35 @@ function buildLoft(
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
   return geometry;
+}
+
+/** Add curved midsections where the torso changes volume. Spending vertices
+ * along the silhouette avoids angular withers and belly corners in side view.
+ * Clamp the cubic midpoint to its neighbours so a narrow neck or waist cannot
+ * overshoot into a fold when the authored profile changes. */
+function softenLoft(sections: readonly LoftSection[]): readonly LoftSection[] {
+  const result: LoftSection[] = [];
+  for (let index = 0; index < sections.length - 1; index += 1) {
+    const start = sections[index]!;
+    const end = sections[index + 1]!;
+    const previous = sections[Math.max(0, index - 1)]!;
+    const next = sections[Math.min(sections.length - 1, index + 2)]!;
+    const midpoint = (key: "width" | "height" | "centerY" | "lowerTaper"): number => {
+      const a = start[key] ?? 0;
+      const b = end[key] ?? 0;
+      return THREE.MathUtils.clamp(
+        (-(previous[key] ?? 0) + 9 * a + 9 * b - (next[key] ?? 0)) / 16,
+        Math.min(a, b), Math.max(a, b),
+      );
+    };
+    result.push(start, {
+      z: (start.z + end.z) / 2,
+      width: midpoint("width"), height: midpoint("height"),
+      centerY: midpoint("centerY"), lowerTaper: midpoint("lowerTaper"),
+    });
+  }
+  result.push(sections[sections.length - 1]!);
+  return result;
 }
 
 function appendSkin(
@@ -624,14 +686,16 @@ function sampleTorsoColor(colors: CatCoatColors, z: number, angle: number): THRE
     * (1 - smoothstep(0.22, 0.35, z));
   base.lerp(belly, underside * 0.92);
 
-  const upperSide = smoothstep(-0.35, 0.86, aroundY);
-  const stripeCenters = [-0.255, -0.19, 0.115, 0.175, 0.23];
+  const upperSide = smoothstep(-0.72, 0.05, aroundY);
+  const stripeCenters = [-0.29, -0.205, -0.105, 0.015, 0.125, 0.22];
   let stripe = 0;
   for (const center of stripeCenters) {
-    const distance = (z - center) / 0.022;
+    const curve = (1 - aroundY * aroundY) * 0.027 * Math.sin(center * 17 + 0.8);
+    const distance = (z - center - curve) / 0.016;
     stripe = Math.max(stripe, Math.exp(-distance * distance));
   }
-  base.lerp(shade, upperSide * stripe * 0.62);
+  const dorsal = smoothstep(0.8, 1, aroundY) * 0.2;
+  base.lerp(shade, Math.max(dorsal, upperSide * stripe * 0.72));
   return base;
 }
 
@@ -643,7 +707,7 @@ function sampleHeadColor(colors: CatCoatColors, z: number, angle: number): THREE
   const belly = new THREE.Color(colors.belly);
 
   const muzzle = smoothstep(0.04, 0.11, z) * smoothstep(0.05, 0.9, -aroundY);
-  base.lerp(belly, muzzle * 0.96);
+  base.lerp(belly, muzzle * 0.28);
 
   const forehead = smoothstep(-0.02, 0.075, z) * smoothstep(0.3, 0.95, aroundY);
   const centreMark = Math.exp(-Math.pow(aroundX / 0.25, 2));

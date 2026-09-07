@@ -554,8 +554,16 @@ export class CatAnimator {
     this.blink = Math.max(0, this.blink - dt * 7);
     const closed = Math.max(this.sleepWeight, Math.sin(clamp(this.blink, 0, 1) * Math.PI));
     const lidScale = lerp(0.02, 1.05, closed);
-    this.rig.eyelidLeft.scale.y = lidScale;
-    this.rig.eyelidRight.scale.y = lidScale;
+    for (const [eye, eyelid] of [
+      [this.rig.eyeLeft, this.rig.eyelidLeft],
+      [this.rig.eyeRight, this.rig.eyelidRight],
+    ] as const) {
+      eyelid.scale.y = lidScale;
+      // Slide down from the upper rim along the cheek's tangent plane. A lid
+      // scaled around the eye centre leaves a fur stripe across an open pupil.
+      eyelid.position.set(0, 0.013 * (1 - closed), 0.0045)
+        .applyQuaternion(eye.quaternion).add(eye.position);
+    }
 
     // The iris stays seated in its socket; only the vertical pupil widens.
     // Scaling the lime eyeballs was the source of the old alert-state bulge.
