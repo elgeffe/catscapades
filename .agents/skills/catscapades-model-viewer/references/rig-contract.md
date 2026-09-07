@@ -9,28 +9,43 @@ model still renders, it just stops being animated correctly.
 ```
 cat                       root; owns world position and facing (y rotation only)
 └─ cat-body               ride height, squash, lean, landing absorb
+   ├─ ribcage             one skinned torso surface, bound to the spine bones
    └─ pelvis              hind-leg attachment, rear spine anchor
-      ├─ hind-left-root   ─┐
-      ├─ hind-right-root  ─┤ leg chains (see below)
+      ├─ hind-left-root   ─┐ each leg skin starts on a stationary socket,
+      ├─ hind-right-root  ─┤ then spans its upper, lower, and foot bones
       ├─ tail-base         │
-      │  └─ tail-0 … tail-8   verlet chain, root first
+      │  ├─ tail-skin         one tapered surface, skinned from socket through tail joints
+      │  └─ tail-0 … tail-11  verlet chain, root first
       └─ spine-lower       │
          └─ spine-upper    │
             └─ chest      ─┘ front-leg attachment
                ├─ front-left-root
                ├─ front-right-root
-               ├─ ribcage       scaled for breathing
+               ├─ scapula-left / scapula-right   invisible stride-timing anchors
+               ├─ head-skin       one seam-free surface bound to neck + head
                └─ neck
                   └─ head
                      ├─ ear-left / ear-right
                      ├─ eye-left / eye-right
+                     ├─ pupil-left / pupil-right
                      ├─ eyelid-left / eyelid-right   scale.y drives blinking
                      └─ jaw
                         └─ mouth-anchor              carry socket
 ```
 
-Each leg chain is `<id>-root → <id>-upper → <id>-lower → <id>-foot`, with the
-pivots placed at the end of the parent segment.
+Each leg root owns a stationary `<id>-socket` plus the animated
+`<id>-upper → <id>-lower → <id>-foot → <id>-paw` chain, with every animated
+pivot placed at the end of the parent segment. `foot` is the sloping
+metapodial; `paw` is the terminal sole. The root also owns one `<id>-skin`
+`SkinnedMesh`, bound in order to its `socket`, `upper`, `lower`, and `foot`
+bones. Socket weighting keeps the buried shoulder or hip flare anchored while
+the upper limb rotates beneath it. The paw remains a separate rigid mesh so its
+planted sole stays compact and level.
+
+`head-skin` is a sibling of `neck` under `chest`, but is bound to the
+`neck → head` bone chain. One lofted surface therefore spans the throat, nape,
+crown, cheeks, and muzzle without an intersecting neck/skull seam; facial
+features remain children of `head`.
 
 ## Who drives what
 
@@ -40,10 +55,15 @@ pivots placed at the end of the parent segment.
 | `cat-body` | `CatAnimator.updateBody` | `position.y`, `position.x`, pitch, roll |
 | `pelvis`, `spine-lower`, `spine-upper` | `updateSpine` | `rotation.x` (flex), `rotation.y` (lateral curve) |
 | `chest` | `updateSpine` | `rotation.z/y` for the swipe twist |
-| leg `upper`/`lower`/`foot` | `solveLeg` in `src/anim/leg-ik.ts` | `rotation.x`, `upper.rotation.z` splay |
+| `ribcage` | spine skinning / `updateSpine` | vertex deformation, subtle breathing scale |
+| leg `upper`/`lower`/`foot`/`paw` | `solveLegLocal` in `src/anim/leg-ik.ts` | sagittal rotation, `upper.rotation.z` splay; terminal sole counter-rotation |
+| each `<id>-skin` | socket/upper/lower/foot skinning | socket-anchored continuous limb deformation; the rigid terminal paw is separate |
+| `scapula-left`, `scapula-right` | `updateLegs` | invisible stride-timing anchors; visible shoulder form comes from the torso and buried front-limb flare |
 | `neck`, `head` | `updateHead` | full rotation, gaze-stabilised |
-| ears, eyelids, eyes, `jaw` | `updateFace` | rotation / scale |
+| `head-skin` | neck/head skinning | seam-free deformation from throat and nape through crown, cheeks, and muzzle |
+| ears, eyelids, pupils, `jaw` | `updateFace` | rotation / scale |
 | `tail-*` | `updateTail` | quaternion, back-solved from a world-space chain |
+| `tail-skin` | tail-joint skinning | vertex deformation |
 | `mouth-anchor` | `CatscapadesGame` | read-only; carried props copy its world transform |
 
 Two systems must never drive the same channel. If you need a new motion, add it
@@ -56,6 +76,8 @@ to the animator method that already owns that joint.
 - `upperLength`, `lowerLength`, `footLength` — segment lengths. The meshes are
   built from these; changing one without the other desynchronises solver and
   silhouette.
+- `paw` — terminal sole child. The IK counter-rotates it against the
+  metapodial angle so planted feet do not inherit the hock's slope.
 - `bend` — `+1` bends the middle joint backwards (front leg elbow), `-1`
   forwards (hind leg stifle). This is what makes front and hind legs read as
   different limbs.
@@ -82,7 +104,7 @@ hip-to-ankle vertical  =  STAND_HEIGHT + bodyOffset.y − footLength·cos(ankleA
 must stay below        =  upperLength + lowerLength    (ideally under ~0.9 of it)
 ```
 
-`ankleAngle` is `HIND_ANKLE_ANGLE` (0.78) or `FRONT_ANKLE_ANGLE` (0.16) from
+`ankleAngle` is `HIND_ANKLE_ANGLE` (0.64) or `FRONT_ANKLE_ANGLE` (0.14) from
 `src/anim/leg-ik.ts`. A ratio near 1.0 gives a stiff, stilted stance; around
 0.85–0.9 gives a relaxed cat.
 
@@ -104,9 +126,12 @@ the animation rate.
 
 ## Tail
 
-`updateTail` simulates the chain in **world space** (verlet, with a per-segment
-rest direction that curves along the chain), then back-solves each joint's local
-quaternion so the meshes stay under the rig. Consequences:
+`updateTail` simulates the chain in **world space** using fixed 120 Hz verlet
+substeps and curvature relaxation, then back-solves each joint's local
+quaternion. One tapered `tail-skin` surface is bound first to `tail-base` and
+then across all 12 joints. The socket-weighted root ring stays buried in the
+rump while the remaining surface follows the simulated curve continuously,
+instead of exposing capsule seams. Consequences:
 
 - The chain needs the rig's world matrix to be current. It calls
   `tailBase.updateWorldMatrix` itself; do not reorder it before the spine

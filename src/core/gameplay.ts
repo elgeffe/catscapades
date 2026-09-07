@@ -60,8 +60,27 @@ export function evaluateCondition(condition: Condition, facts: ObjectiveFacts): 
   return condition.conditions.some((item) => evaluateCondition(item, facts));
 }
 
-export function selectCameraZone(current: string, x: number): string {
-  if (current === "garden") return x > -2.65 ? "kitchen" : current;
-  if (current === "kitchen") return x < -3.4 ? "garden" : x > 7.35 ? "dining" : current;
-  return x < 6.65 ? "kitchen" : current;
+export function selectCameraZone(current: string, x: number, z: number): string {
+  const utilityEnterZ = 4.85;
+  const utilityExitZ = 4.15;
+
+  if (current === "garden") {
+    if (x <= -2.65) return current;
+    return z > utilityEnterZ ? "utility" : "kitchen";
+  }
+  if (current === "utility") {
+    if (x < -3.4) return "garden";
+    if (x > 7.35) return "dining";
+    return z < utilityExitZ ? "kitchen" : current;
+  }
+  if (current === "kitchen") {
+    if (x < -3.4) return "garden";
+    if (x > 7.35) return "dining";
+    return z > utilityEnterZ ? "utility" : current;
+  }
+  if (current === "dining") {
+    if (x >= 6.65) return current;
+    return z > utilityEnterZ ? "utility" : "kitchen";
+  }
+  return "kitchen";
 }

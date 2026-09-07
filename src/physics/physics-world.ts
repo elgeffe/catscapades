@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import RAPIER from "@dimforge/rapier3d-compat";
+import type { NavigationObstacle } from "../core/pathfinding";
 
 /**
  * Rapier integration.
@@ -28,6 +29,19 @@ export interface StaticBoxOptions {
   /** Excluded from character collision. Used for trigger-like scenery. */
   readonly sensor?: boolean;
   readonly label?: string;
+}
+
+/** Runtime handle for authored scenery whose collision state can change. */
+export class StaticColliderHandle {
+  constructor(private readonly collider: RAPIER.Collider) {}
+
+  setEnabled(enabled: boolean): void {
+    this.collider.setEnabled(enabled);
+  }
+
+  isEnabled(): boolean {
+    return this.collider.isEnabled();
+  }
 }
 
 export type DynamicShape =
@@ -214,6 +228,14 @@ export class PhysicsWorld {
   private readonly world: RAPIER.World;
   private readonly dynamicBodies: DynamicBody[] = [];
   private readonly staticLabels = new Map<number, string>();
+  private readonly staticObstacles: {
+    readonly center: THREE.Vector3;
+    readonly halfExtents: THREE.Vector3;
+    readonly rotationY: number;
+    readonly sensor: boolean;
+    readonly label?: string;
+    readonly collider: RAPIER.Collider;
+  }[] = [];
 
   private constructor() {
     this.world = new RAPIER.World({ x: 0, y: WORLD_GRAVITY, z: 0 });
@@ -226,7 +248,7 @@ export class PhysicsWorld {
     return new PhysicsWorld();
   }
 
-  addStaticBox(options: StaticBoxOptions): void {
+  addStaticBox(options: StaticBoxOptions): StaticColliderHandle {
     const center = toVector(options.center);
     const half = toVector(options.halfExtents);
     const body = this.world.createRigidBody(
@@ -238,6 +260,15 @@ export class PhysicsWorld {
     if (options.sensor) desc.setSensor(true);
     const collider = this.world.createCollider(desc, body);
     if (options.label) this.staticLabels.set(collider.handle, options.label);
+    this.staticObstacles.push({
+      center: center.clone(),
+      halfExtents: half.clone(),
+      rotationY: options.rotationY ?? 0,
+      sensor: options.sensor ?? false,
+      label: options.label,
+      collider,
+    });
+    return new StaticColliderHandle(collider);
   }
 
   addDynamicBody(options: DynamicBodyOptions): DynamicBody {
@@ -314,6 +345,26 @@ export class PhysicsWorld {
 
   bodies(): readonly DynamicBody[] {
     return this.dynamicBodies;
+  }
+
+  /**
+   * Walk-blocking X/Z footprints sourced from the exact boxes Rapier uses.
+   * Elevated shelves are ignored because they do not intersect the homeowner;
+   * disabled door leaves disappear from this list as soon as their collider
+   * opens.
+   */
+  navigationObstacles(minY: number, maxY: number): NavigationObstacle[] {
+    return this.staticObstacles
+      .filter((obstacle) => obstacle.collider.isEnabled()
+        && !obstacle.sensor
+        && obstacle.label !== "floor"
+        && obstacle.center.y + obstacle.halfExtents.y >= minY
+        && obstacle.center.y - obstacle.halfExtents.y <= maxY)
+      .map((obstacle) => ({
+        center: { x: obstacle.center.x, z: obstacle.center.z },
+        halfExtents: { x: obstacle.halfExtents.x, z: obstacle.halfExtents.z },
+        rotationY: obstacle.rotationY,
+      }));
   }
 
   /** Number of dynamic bodies currently awake, for the debug overlay. */

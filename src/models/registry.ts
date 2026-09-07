@@ -167,7 +167,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     id: "cat",
     label: "Cat (player)",
     category: "character",
-    description: "Fully rigged cat: spine chain, digitigrade IK legs, verlet tail, articulated head.",
+    description: "Skinned cat with continuous torso, seam-free neck/head, socket-anchored limbs, and socket-to-tip tail surfaces, plus level paws and an expressive face.",
     instantiate: () => {
       const rig = buildCat();
       return { object: rig.root, driver: new CatDriver(new CatAnimator(rig)) };
@@ -194,15 +194,15 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
   { id: "sideboard", label: "Sideboard", category: "furniture", description: "Low cabinet at 1.12, the mid step of the dining traversal network.", instantiate: fromBuilt(buildSideboard) },
   { id: "washing-machine", label: "Washing machine", category: "furniture", description: "Utility appliance with a glazed door. Top at 1.28.", instantiate: fromBuilt(buildWashingMachine) },
   { mount: "wall", id: "wall-shelf", label: "Wall shelf", category: "furniture", description: "Bracketed floating shelf at 2.02, the highest kitchen perch.", instantiate: fromBuilt(buildWallShelf) },
-  { id: "cardboard-box", label: "Cardboard box", category: "furniture", description: "The cat's home base, with folded flaps and a blanket.", instantiate: fromBuilt(buildCardboardBox) },
+  { id: "cardboard-box", label: "Sleeping pad", category: "furniture", description: "The cat's low outdoor home base, with an inset blanket and no obstructing sides.", instantiate: fromBuilt(buildCardboardBox) },
   { mount: "surface", id: "laundry-basket", label: "Laundry basket", category: "furniture", description: "Wicker basket with laundry. Hiding place in the utility nook.", instantiate: fromBuilt(buildLaundryBasket) },
   { id: "bin", label: "Kitchen bin", category: "furniture", description: "Pedal bin with a separate lid object.", instantiate: fromBuilt(buildBin) },
 
-  { id: "doorway", label: "Doorway", category: "scenery", description: "Framed opening with a door leaf on a hinge pivot named `door`.", instantiate: fromBuilt(buildDoorway) },
+  { id: "doorway", label: "Doorway", category: "scenery", description: "Permanent framed opening without a door leaf.", instantiate: fromBuilt(buildDoorway) },
   { mount: "wall", id: "window", label: "Window", category: "scenery", description: "Glazed window with frame, sill, and curtains.", instantiate: fromBuilt(buildWindow) },
   { id: "fence-panel", label: "Fence panel", category: "scenery", description: "Garden boundary fence with varied plank heights.", instantiate: fromBuilt(buildFencePanel) },
   { id: "planter", label: "Raised planter", category: "scenery", description: "Brick planter at 0.82 — the tutorial jump.", instantiate: fromBuilt(buildPlanter) },
-  { id: "potted-plant", label: "Potted plant", category: "scenery", description: "Pot, soil, and splayed leaves.", instantiate: () => ({ object: buildPottedPlant().object }) },
+  { id: "potted-plant", label: "Potted plant", category: "scenery", description: "Open-rimmed pot with separated soil surface and splayed leaves.", instantiate: () => ({ object: buildPottedPlant().object }) },
   { id: "rug", label: "Rug", category: "scenery", description: "Bordered floor rug.", instantiate: () => ({ object: buildRug(3.4, 2.4).object }) },
 
   { mount: "surface", id: "mug", label: "Mug", category: "prop", description: "Carryable, breakable ceramic mug with handle and contents.", instantiate: fromBuilt(buildMug) },
@@ -215,7 +215,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
   { mount: "surface", id: "mouse-toy", label: "Mouse toy", category: "prop", description: "Carryable felt mouse with tail and ears.", instantiate: fromBuilt(buildMouseToy) },
   { mount: "surface", id: "flour-bag", label: "Flour bag", category: "prop", description: "Sealed sack with `flour-spill` and `flour-cloud` states.", instantiate: fromBuilt(buildFlourBag) },
   { mount: "surface", id: "puddle", label: "Water puddle", category: "prop", description: "Overflow decal that grows as the sink runs.", instantiate: fromBuilt(buildPuddle) },
-  { mount: "surface", id: "cat-bowl", label: "Cat bowl", category: "prop", description: "Food bowl scenery near the back door.", instantiate: fromBuilt(buildCatBowl) },
+  { mount: "surface", id: "cat-bowl", label: "Cat bowl", category: "prop", description: "Food bowl scenery near the garden opening.", instantiate: fromBuilt(buildCatBowl) },
   { mount: "surface", id: "kettle", label: "Kettle", category: "prop", description: "Swipeable worktop appliance.", instantiate: fromBuilt(buildKettle) },
   { mount: "surface", id: "book", label: "Book", category: "prop", description: "Swipeable sideboard clutter.", instantiate: fromBuilt(buildBook) },
 ];

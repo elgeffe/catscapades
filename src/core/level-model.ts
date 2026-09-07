@@ -1,6 +1,6 @@
 export type Area = "garden" | "kitchen" | "counter" | "dining" | "utility" | "box";
 export type ItemId = "key" | "sock" | "sponge" | "snack" | "toy";
-export type PreparationId = "sink" | "flour" | "cupboard" | "mug";
+export type PreparationId = "sink" | "flour" | "cupboard";
 
 export const OBJECTIVE_DEFINITIONS = [
   { id: "enter", text: "Get inside" },
@@ -23,22 +23,22 @@ export type LevelCommand =
   | { type: "meow" }
   | { type: "jump"; to: Area }
   | { type: "take"; item: ItemId }
-  | { type: "drop" }
+  | { type: "drop"; into?: "sink" }
   | { type: "prepare"; target: PreparationId }
-  | { type: "trigger" }
+  | { type: "break"; target: "mug" }
   | { type: "sleep" };
 
 export interface LevelEvent {
-  type: "area-changed" | "stimulus" | "item-taken" | "item-dropped" | "prepared" | "objective-completed" | "catastrophe" | "level-completed" | "rejected";
+  type: "area-changed" | "stimulus" | "item-taken" | "item-dropped" | "prepared" | "prop-broken" | "objective-completed" | "catastrophe" | "level-completed" | "rejected";
   message: string;
 }
 
 export interface LevelSnapshot {
   area: Area;
-  doorOpen: boolean;
   distracted: boolean;
   carrying: ItemId | null;
   preparations: ReadonlySet<PreparationId>;
+  mugBroken: boolean;
   objectives: ReadonlySet<string>;
   complete: boolean;
 }
@@ -54,17 +54,18 @@ const CONNECTIONS: Readonly<Record<Area, readonly Area[]>> = {
 
 export class LevelModel {
   private area: Area = "box";
-  private doorOpen = false;
   private distracted = false;
   private carrying: ItemId | null = null;
   private readonly movedItems = new Map<ItemId, Area>();
   private readonly preparations = new Set<PreparationId>();
+  private mugBroken = false;
   private readonly objectives = new Set<string>();
   private complete = false;
 
   snapshot(): LevelSnapshot {
-    return { area: this.area, doorOpen: this.doorOpen, distracted: this.distracted, carrying: this.carrying,
-      preparations: new Set(this.preparations), objectives: new Set(this.objectives), complete: this.complete };
+    return { area: this.area, distracted: this.distracted, carrying: this.carrying,
+      preparations: new Set(this.preparations), mugBroken: this.mugBroken,
+      objectives: new Set(this.objectives), complete: this.complete };
   }
 
   availableCommands(): LevelCommand[] {
@@ -72,16 +73,21 @@ export class LevelModel {
     const commands: LevelCommand[] = [{ type: "meow" }];
     for (const to of CONNECTIONS[this.area]) {
       if (to === "counter") commands.push({ type: "jump", to });
-      else if (to !== "kitchen" || this.area !== "garden" || this.doorOpen) commands.push({ type: "move", to });
+      else commands.push({ type: "move", to });
     }
-    if (this.carrying) commands.push({ type: "drop" });
+    if (this.carrying) {
+      commands.push({ type: "drop" });
+      if (this.carrying === "sock" && this.area === "kitchen" && this.preparations.has("sink")) {
+        commands.push({ type: "drop", into: "sink" });
+      }
+    }
     else for (const item of Object.keys(ITEM_AREAS) as ItemId[]) {
       if ((this.movedItems.get(item) ?? ITEM_AREAS[item]) === this.area) commands.push({ type: "take", item });
     }
     if (this.area === "kitchen") {
       for (const target of ["sink", "flour", "cupboard"] as const) if (!this.preparations.has(target)) commands.push({ type: "prepare", target });
-      if (this.preparations.size >= 2 && !this.objectives.has("catastrophe")) commands.push({ type: "trigger" });
     }
+    if (this.area === "dining" && !this.mugBroken) commands.push({ type: "break", target: "mug" });
     if (this.area === "box" && this.objectives.has("catastrophe")) commands.push({ type: "sleep" });
     return commands;
   }
@@ -91,8 +97,8 @@ export class LevelModel {
       return [{ type: "rejected", message: `Cannot ${describe(command)} from ${this.area}.` }];
     }
     if (command.type === "meow") {
-      this.doorOpen = true; this.distracted = true; this.objectives.add("distract");
-      return this.completed("distract", "The homeowner opens the back door to investigate the meow.", "stimulus");
+      this.distracted = true; this.objectives.add("distract");
+      return this.completed("distract", "The homeowner investigates the meow.", "stimulus");
     }
     if (command.type === "move" || command.type === "jump") {
       this.area = command.to;
@@ -108,20 +114,42 @@ export class LevelModel {
     }
     if (command.type === "drop") {
       const item = this.carrying!; this.movedItems.set(item, this.area); this.carrying = null;
-      return [{ type: "item-dropped", message: `Dropped ${item} in ${this.area}.` }];
+      const events: LevelEvent[] = [{
+        type: "item-dropped",
+        message: command.into === "sink" ? `Dropped ${item} in the running sink.` : `Dropped ${item} in ${this.area}.`,
+      }];
+      if (command.into === "sink") {
+        this.objectives.add("sock-sink");
+        events.push({ type: "objective-completed", message: "Drop the sock in the running sink completed." });
+      }
+      return events;
     }
     if (command.type === "prepare") {
       this.preparations.add(command.target);
       const events: LevelEvent[] = [{ type: "prepared", message: `Prepared ${command.target} (${this.preparations.size}/2 needed).` }];
       if (this.preparations.size >= 2 && !this.objectives.has("prepare")) { this.objectives.add("prepare"); events.push({ type: "objective-completed", message: "Prepare the disaster completed." }); }
+      events.push(...this.resolveCatastrophe());
       return events;
     }
-    if (command.type === "trigger") {
-      this.objectives.add("catastrophe");
-      return [{ type: "catastrophe", message: "Water, flour, and crockery combine into a breakfast catastrophe." }, { type: "objective-completed", message: "Trigger the catastrophe completed." }];
+    if (command.type === "break") {
+      this.mugBroken = true;
+      return [
+        { type: "prop-broken", message: "The red mug smashed on the breakfast-room floor." },
+        ...this.resolveCatastrophe(),
+      ];
     }
     this.complete = true; this.objectives.add("innocent");
     return [{ type: "objective-completed", message: "Act innocent completed." }, { type: "level-completed", message: "Catscapades complete." }];
+  }
+
+  private resolveCatastrophe(): LevelEvent[] {
+    if (this.objectives.has("catastrophe")
+      || !isCatastropheReady(this.mugBroken, this.preparations.size)) return [];
+    this.objectives.add("catastrophe");
+    return [
+      { type: "catastrophe", message: "Water, flour, and crockery combine into a breakfast catastrophe." },
+      { type: "objective-completed", message: "Trigger the catastrophe completed." },
+    ];
   }
 
   private completed(id: string, message: string, type: LevelEvent["type"]): LevelEvent[] {
@@ -133,8 +161,14 @@ export class LevelModel {
 function describe(command: LevelCommand): string {
   if ("to" in command) return `${command.type} to ${command.to}`;
   if ("item" in command) return `take ${command.item}`;
-  if ("target" in command) return `prepare ${command.target}`;
+  if (command.type === "prepare") return `prepare ${command.target}`;
+  if (command.type === "break") return `break ${command.target}`;
+  if (command.type === "drop" && command.into) return `drop into ${command.into}`;
   return command.type;
+}
+
+export function isCatastropheReady(mugBroken: boolean, preparationCount: number): boolean {
+  return mugBroken && preparationCount >= 2;
 }
 
 export interface PlaytestReport {
@@ -151,7 +185,8 @@ export function runCriticalPath(): { events: LevelEvent[]; snapshot: LevelSnapsh
     { type: "move", to: "garden" }, { type: "meow" }, { type: "move", to: "kitchen" },
     { type: "jump", to: "counter" }, { type: "take", item: "key" }, { type: "move", to: "kitchen" },
     { type: "drop" }, { type: "prepare", target: "sink" }, { type: "prepare", target: "flour" },
-    { type: "trigger" }, { type: "move", to: "garden" }, { type: "move", to: "box" }, { type: "sleep" },
+    { type: "move", to: "dining" }, { type: "break", target: "mug" }, { type: "move", to: "kitchen" },
+    { type: "move", to: "garden" }, { type: "move", to: "box" }, { type: "sleep" },
   ];
   const events: LevelEvent[] = [];
   let maximumChoices = 0;
@@ -167,6 +202,7 @@ export function runCriticalPath(): { events: LevelEvent[]; snapshot: LevelSnapsh
     notes: [
       "The key has a readable jump-before-grab setup.",
       "Three preparations allow player-selected ordering; only two are required.",
+      "The catastrophe resolves when preparation and the breakfast-room mug break are both complete, in either order.",
       "The route alternates observation, traversal, carrying, preparation, payoff, and escape.",
     ],
   } };

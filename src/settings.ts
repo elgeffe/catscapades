@@ -1,6 +1,7 @@
 export interface GameSettings {
   masterVolume: number;
   effectsVolume: number;
+  musicVolume: number;
   graphics: "low" | "high";
   reducedMotion: boolean;
   highContrast: boolean;
@@ -8,7 +9,8 @@ export interface GameSettings {
 
 const KEY = "catscapades-settings-v1";
 export const DEFAULT_SETTINGS: GameSettings = {
-  masterVolume: 0.8, effectsVolume: 0.8, graphics: "high", reducedMotion: false, highContrast: false,
+  masterVolume: 0.8, effectsVolume: 0.8, musicVolume: 0.35,
+  graphics: "high", reducedMotion: false, highContrast: false,
 };
 
 export function loadSettings(storage: Pick<Storage, "getItem"> | null = safeStorage()): GameSettings {

@@ -112,7 +112,7 @@ expensive model error, so check new models against these:
 | --- | --- |
 | Cat, at the shoulder | 0.32 |
 | Cat, nose to tail tip | ~1.2 |
-| Cardboard box rim | 0.62 |
+| Cardboard sleeping pad | 0.14 |
 | Chair seat | 0.68 |
 | Garden planter | 0.82 |
 | Dining table top | 1.15 |

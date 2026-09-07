@@ -4,17 +4,17 @@ A desktop browser stealth-comedy MVP about an extremely innocent cat. Observe a 
 
 ## Included
 
-- A fully rigged cat with procedural animation: a spine chain, digitigrade two-bone IK legs, four gaits (creep, walk, trot, gallop) with blended transitions, a verlet-simulated tail, gaze-stabilised head, ears, blinking, and pose states for stalking, carrying, sitting, and pretending to be asleep
+- A fully rigged cat with a continuous skinned torso, seam-free two-bone neck/head skin, socket-to-tip tail skin, socket-anchored digitigrade limb skins with level terminal paws, integrated pinnae, invisible scapula timing anchors, expressive pupils and eyelids, four blended gaits, gaze stabilisation, and authored pose states
 - Rapier 3D physics: a kinematic character controller for the cat and homeowner, dynamic rigid bodies for every swipeable prop, and real vertical traversal
 - Contextual leaps onto authored ledges — chair to table, floor to worktop to wall shelf, planter, box, sideboard, washing machine — plus a forward ledge probe so unauthored geometry is climbable too
-- Three authored semi-fixed camera zones with dead zones, look-ahead, FOV blending, separated movement-basis blending, and doorway hysteresis
+- Four authored semi-fixed camera compositions, including utility-nook coverage, with dead zones, look-ahead, FOV blending, separated movement-basis blending, and transition hysteresis
 - A three-room house built from typed level data: kitchen, breakfast room, utility nook and garden, with procedural wood, tile, grass and plaster surfaces
 - Contextual paw actions, five carryable item types, and escalating disaster states (running sink → pooling → overflow, punctured flour, opened cupboard, broken crockery)
 - One homeowner with a morning routine, stimulus investigation, suspicion, pursuit and forgiving catch/reset behaviour
 - Six-stage objective chain, multi-condition finale, and four optional challenges
 - A standalone model viewer plus headless model inspection and screenshot tooling
 - Desktop keyboard and standard gamepad controls
-- Pause/settings menu, graphics mode, volume controls, local persistence, and developer diagnostics including Rapier collider wireframes
+- Pause/settings menu, graphics mode, independent quiet music/effects controls, local persistence, and developer diagnostics including Rapier collider wireframes
 - Procedural primitive art; no external assets
 - Relative Vite base path, suitable for GitHub Pages builds
 
@@ -69,7 +69,7 @@ Agentic development instructions live in `.agents/skills/catscapades-playtest`. 
 
 ## Architecture
 
-`src/main.ts` owns bootstrap and pause/settings wiring. `src/input.ts` centralizes keyboard and gamepad actions. `src/core/gameplay.ts` contains pure interaction, stimulus, suspicion, camera-hysteresis, and objective rules. `src/settings.ts` provides guarded localStorage persistence. `src/game.ts` composes the Three.js world, kinematic collision, authored cameras, cat, homeowner, props, objectives, and presentation while the prototype is incrementally extracted.
+`src/main.ts` owns bootstrap and pause/settings wiring. `src/input.ts` centralizes keyboard and gamepad actions. `src/core/gameplay.ts` contains pure interaction, stimulus, suspicion, camera-hysteresis, and objective rules; `src/core/pathfinding.ts` contains the rendering-independent A* floor-grid solver. `src/settings.ts` provides guarded localStorage persistence. `src/game.ts` composes the Three.js world, kinematic collision, authored cameras, cat, homeowner, props, objectives, and presentation while the prototype is incrementally extracted.
 
 The simulation runs at a fixed 60 Hz with capped frame accumulation. The cat stays kinematic and the project retains its small authored collision layer rather than adding a rigid-body dependency.
 
@@ -88,7 +88,7 @@ The Vite configuration uses a relative base path and `.github/workflows/deploy.y
 
 ## Known limitations
 
-- Art, animation, and sound remain procedural low-poly placeholders.
+- The cat uses a purpose-built procedural character mesh and rig; most scenery, prop art, animation, and sound remain stylised procedural assets rather than an external production asset pipeline.
 - Navigation and prop motion are authored for this single compact level rather than general-purpose physics or navmesh systems.
 - The developer panel reports runtime state but visual collider/route overlays remain an authoring follow-up.
 
@@ -108,9 +108,9 @@ The camera is authored by zone. Each zone provides a fixed composition, a target
 | Cat locomotion | `src/cat/cat-controller.ts` |
 | Animation | `src/anim/cat-animator.ts`, `src/anim/leg-ik.ts`, `src/anim/owner-animator.ts` |
 | Camera | `src/camera/camera-director.ts` |
-| Models | `src/models/` — `cat.ts`, `owner.ts`, `furniture.ts`, `props.ts`, `materials.ts`, `registry.ts`, `inspect.ts` |
+| Models | `src/models/` — `cat.ts`, `cat-geometry.ts`, `owner.ts`, `furniture.ts`, `props.ts`, `materials.ts`, `registry.ts`, `inspect.ts` |
 | Level | `src/level/level-data.ts` (authored data), `src/level/level-builder.ts` (scene + colliders) |
-| Rendering-independent rules | `src/core/` — `gameplay.ts`, `level-model.ts`, `math.ts` |
+| Rendering-independent rules | `src/core/` — `gameplay.ts`, `level-model.ts`, `math.ts`, `pathfinding.ts` |
 | Model viewer | `viewer.html`, `src/viewer/` |
 
 Visuals and collision come from one source: each furniture builder returns its own
@@ -157,9 +157,11 @@ See `.agents/skills/catscapades-model-viewer/SKILL.md` for the full workflow.
 
 ## Known limitations
 
-- Audio is synthesized rather than authored, and there are no subtitles yet.
-- The homeowner navigates by direct steering with collision, not a route graph, so
-  dense furniture can briefly snag pursuit.
+- Music and effects are synthesized rather than recorded assets, and there are no subtitles yet.
+- The homeowner uses an obstacle-aware A* floor grid sourced from the same
+  collider boxes as the rendered furniture. Moving props are intentionally not
+  baked into the route grid; the kinematic controller pushes or slides around
+  those lightweight pieces at runtime.
 - The production JavaScript chunk exceeds Vite's 500 kB warning threshold now that
   Rapier is bundled. Load performance is within the desktop target; splitting the
   viewer and debug modules is the next step if it grows.

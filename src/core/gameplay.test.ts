@@ -23,8 +23,13 @@ describe("gameplay rules", () => {
     expect(updateSuspicion(4, "innocent")).toBe(0);
   });
   it("uses hysteresis at camera thresholds", () => {
-    expect(selectCameraZone("garden", -2.8)).toBe("garden");
-    expect(selectCameraZone("kitchen", -2.8)).toBe("kitchen");
-    expect(selectCameraZone("dining", 7)).toBe("dining");
+    expect(selectCameraZone("garden", -2.8, 0)).toBe("garden");
+    expect(selectCameraZone("kitchen", -2.8, 0)).toBe("kitchen");
+    expect(selectCameraZone("dining", 7, 0)).toBe("dining");
+    expect(selectCameraZone("kitchen", 5, 4.7)).toBe("kitchen");
+    expect(selectCameraZone("kitchen", 5, 5)).toBe("utility");
+    expect(selectCameraZone("utility", 5, 4.2)).toBe("utility");
+    expect(selectCameraZone("utility", 5, 3.7)).toBe("kitchen");
+    expect(selectCameraZone("utility", 8, 6)).toBe("dining");
   });
 });

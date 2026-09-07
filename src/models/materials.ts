@@ -27,11 +27,11 @@ export const PALETTE = {
   fridge: 0xdfe4e4,
   steel: 0xa9b0b3,
   brass: 0xc8a24a,
-  furWarm: 0x4a423b,
-  furDark: 0x322c27,
-  furCream: 0xdccfb4,
+  furWarm: 0x8f6044,
+  furDark: 0x50372e,
+  furCream: 0xe2d3b5,
   nose: 0xc98c92,
-  eye: 0xb9cf4e,
+  eye: 0xb8ad52,
   skin: 0xc98f6a,
   hair: 0x40342b,
   shirt: 0x5d7f7c,
@@ -54,10 +54,13 @@ export interface SurfaceOptions {
   roughness?: number;
   metalness?: number;
   flatShading?: boolean;
+  vertexColors?: boolean;
   emissive?: number;
   emissiveIntensity?: number;
   transparent?: boolean;
   opacity?: number;
+  /** Transparent overlays default to false to avoid sorting against their own depth. */
+  depthWrite?: boolean;
   map?: THREE.Texture | null;
   side?: THREE.Side;
 }
@@ -71,13 +74,19 @@ export function surface(color: number, options: SurfaceOptions = {}): THREE.Mesh
   const cached = materialCache.get(key);
   if (cached) return cached;
 
+  const transparent = options.transparent ?? false;
   const material = new THREE.MeshStandardMaterial({
     color,
     roughness: options.roughness ?? 0.85,
     metalness: options.metalness ?? 0,
     flatShading: options.flatShading ?? false,
-    transparent: options.transparent ?? false,
+    vertexColors: options.vertexColors ?? false,
+    transparent,
     opacity: options.opacity ?? 1,
+    // Depth-writing translucent planes are especially prone to flicker where
+    // puddle blobs, window glass, and the light shaft overlap. Keep depth
+    // testing, but let opaque geometry own the depth buffer.
+    depthWrite: options.depthWrite ?? !transparent,
     side: options.side ?? THREE.FrontSide,
   });
   if (options.map) material.map = options.map;
@@ -121,7 +130,13 @@ function makeTexture(
   texture.wrapT = THREE.RepeatWrapping;
   texture.repeat.set(repeat[0], repeat[1]);
   texture.colorSpace = THREE.SRGBColorSpace;
-  texture.anisotropy = 4;
+  // Explicit trilinear mip filtering keeps high-frequency floor and plaster
+  // patterns from shimmering as the diorama camera moves. WebGLRenderer clamps
+  // anisotropy to the GPU's supported maximum.
+  texture.generateMipmaps = true;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.anisotropy = 8;
   textureCache.set(key, texture);
   return texture;
 }

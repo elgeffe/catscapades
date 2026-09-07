@@ -37,22 +37,33 @@ requireElement<HTMLButtonElement>("#pause-restart-button").addEventListener("cli
 const bindSettings = (): void => {
   const master = requireElement<HTMLInputElement>("#master-volume");
   const effects = requireElement<HTMLInputElement>("#effects-volume");
+  const music = requireElement<HTMLInputElement>("#music-volume");
   const graphics = requireElement<HTMLSelectElement>("#graphics-quality");
   const reducedMotion = requireElement<HTMLInputElement>("#reduced-motion");
   const highContrast = requireElement<HTMLInputElement>("#high-contrast");
   master.value = String(settings.masterVolume);
   effects.value = String(settings.effectsVolume);
+  music.value = String(settings.musicVolume);
   graphics.value = settings.graphics;
   reducedMotion.checked = settings.reducedMotion;
   highContrast.checked = settings.highContrast;
   const update = (): void => {
-    settings = { masterVolume: Number(master.value), effectsVolume: Number(effects.value), graphics: graphics.value as GameSettings["graphics"], reducedMotion: reducedMotion.checked, highContrast: highContrast.checked };
+    settings = {
+      masterVolume: Number(master.value),
+      effectsVolume: Number(effects.value),
+      musicVolume: Number(music.value),
+      graphics: graphics.value as GameSettings["graphics"],
+      reducedMotion: reducedMotion.checked,
+      highContrast: highContrast.checked,
+    };
     saveSettings(settings);
     game.applySettings(settings);
   };
-  [master, effects, graphics, reducedMotion, highContrast].forEach((element) => element.addEventListener("change", update));
+  [master, effects, music, graphics, reducedMotion, highContrast]
+    .forEach((element) => element.addEventListener("change", update));
   master.addEventListener("input", update);
   effects.addEventListener("input", update);
+  music.addEventListener("input", update);
 };
 bindSettings();
 

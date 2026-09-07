@@ -16,8 +16,8 @@
 | `jump` | Contextual traversal prerequisite, such as counter access |
 | `take` | Carry item from its authored area |
 | `drop` | Detach carried item at the cat position |
-| `prepare` | Change sink, flour, cupboard, or mug state |
-| `trigger` | Resolve the multi-condition catastrophe |
+| `prepare` | Change sink, flour, or cupboard state |
+| `break` | Smash the red mug in the breakfast room; the break is remembered if preparation is incomplete |
 | `sleep` | Finish from the innocence box |
 
 ## Extension checklist

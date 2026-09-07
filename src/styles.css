@@ -97,6 +97,13 @@ kbd { font: inherit; }
   margin-top: 0;
 }
 
+.objective.current:not(.complete) {
+  margin-inline: -8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(214, 83, 60, 0.12);
+}
+
 .objective.complete { opacity: .55; text-decoration: line-through; }
 .objective.complete .box { background: var(--ink); position: relative; }
 .objective.complete .box::after { content: "✓"; color: var(--cream); position: absolute; inset: -5px 0 0 1px; font-size: 15px; }

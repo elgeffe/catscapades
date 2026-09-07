@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { SINK_BASIN_GEOMETRY } from "../models/furniture";
 
 /**
  * "A Perfectly Quiet Morning" — authored level data.
@@ -13,7 +14,7 @@ import * as THREE from "three";
  *           │                       │  fridge stove    │   window        │
  *           │      GARDEN           │  sink  counter   │   table+chairs  │
  *           │   box  planter        │  shelf  cupboard │   sideboard     │
- *     z=0   │            ▓ back door▓        ▓ arch ▓  │                 │
+ *     z=0   │            ▓ opening ▓         ▓ arch ▓  │                 │
  *           │                       │   rug   table    │   rug           │
  *           │                       │  UTILITY: washer │                 │
  *     z=+8  └───────────────────────┴──────────────────┴─────────────────┘
@@ -21,6 +22,7 @@ import * as THREE from "three";
  */
 
 export type RoomId = "garden" | "kitchen" | "dining";
+export type CameraZoneId = RoomId | "utility";
 
 export const WORLD = {
   minX: -15,
@@ -104,8 +106,6 @@ export const PLACEMENTS: readonly PlacementSpec[] = [
   { id: "garden-plant-b", model: "potted-plant", position: [-7.9, 0, 6.4], scale: 0.85 },
   { id: "garden-plant-c", model: "potted-plant", position: [-4.9, 0, 3.3], scale: 0.7 },
   { id: "cat-bowl", model: "cat-bowl", position: [-4.6, 0, 1.9] },
-  { id: "back-door", model: "doorway", position: [WORLD.backDoorX, 0, 0], size: [2.6, 2.9] },
-
   // -- kitchen: the working run along the north wall -------------------------
   { id: "fridge", model: "fridge", position: [-2.4, 0, -7.1] },
   { id: "stove", model: "stove", position: [-0.4, 0, -7.15] },
@@ -119,10 +119,10 @@ export const PLACEMENTS: readonly PlacementSpec[] = [
   { id: "kitchen-rug", model: "rug", position: [2.2, 0, 2.6], size: [4.2, 3.2] },
   { id: "bin", model: "bin", position: [6.4, 0, -4.6] },
   { id: "kitchen-plant", model: "potted-plant", position: [-2.7, 0, -3.4], scale: 1 },
-  { id: "arch", model: "doorway", position: [WORLD.archX, 0, 0.2], size: [2.6, 2.9] },
-
   // -- utility nook (south-east of the kitchen) ------------------------------
-  { id: "washer", model: "washing-machine", position: [5.9, 0, 6.9] },
+  // The appliance's glazed door is its local +Z face. Turn it back into the
+  // room instead of presenting its blank rear panel while facing the wall.
+  { id: "washer", model: "washing-machine", position: [5.9, 0, 6.9], rotationY: Math.PI },
   { id: "basket", model: "laundry-basket", position: [4.1, 0, 6.6] },
 
   // -- dining ---------------------------------------------------------------
@@ -159,6 +159,20 @@ export const PROPS: readonly PropSpec[] = [
   { id: "sausage", model: "sausage", position: [11.4, 1.22, -2.3], label: "a breakfast sausage", carryable: true },
   { id: "mouse-toy", model: "mouse-toy", position: [-9.4, 0.12, -2.1], label: "your mouse toy", carryable: true },
 ];
+
+const SINK_PLACEMENT = PLACEMENTS.find((placement) => placement.id === "sink");
+if (!SINK_PLACEMENT) throw new Error("The authored level is missing its sink placement.");
+
+/** The physical bowl used by prompts and the contextual sock-drop action. */
+export const SINK_BASIN = {
+  position: [
+    SINK_PLACEMENT.position[0] + SINK_BASIN_GEOMETRY.centerX,
+    SINK_BASIN_GEOMETRY.bottom + 0.21,
+    SINK_PLACEMENT.position[2] + SINK_BASIN_GEOMETRY.centerZ,
+  ] as const,
+  interactionRadius: 1.45,
+  minCatHeight: 1.0,
+} as const;
 
 /**
  * Contextual jump targets.
@@ -213,9 +227,9 @@ export const STATIONS: readonly StationSpec[] = [
 
 export const FLOUR_BAG_POSITION: readonly [number, number, number] = [6.4, 1.35, -7.05];
 
-/** Semi-fixed camera compositions, one per room. */
+/** Semi-fixed camera compositions, including close-ups for important room edges. */
 export interface CameraZoneSpec {
-  readonly id: RoomId;
+  readonly id: CameraZoneId;
   readonly label: string;
   readonly target: readonly [number, number, number];
   readonly offset: readonly [number, number, number];
@@ -241,6 +255,11 @@ export const CAMERA_ZONES: readonly CameraZoneSpec[] = [
     id: "kitchen", label: "THE KITCHEN",
     target: [2.0, 0.5, -1.0], offset: [-1.6, 5.6, 6.6],
     fov: 37, deadZone: [1.5, 1.1], follow: 0.86, lookAhead: 0.55,
+  },
+  {
+    id: "utility", label: "THE UTILITY NOOK",
+    target: [5.0, 0.5, 6.15], offset: [-4.3, 4.9, -5.5],
+    fov: 36, deadZone: [1.0, 0.75], follow: 0.8, lookAhead: 0.4,
   },
   {
     id: "dining", label: "THE BREAKFAST ROOM",

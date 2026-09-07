@@ -1,6 +1,18 @@
 import * as THREE from "three";
 import { PALETTE, surface } from "./materials";
 import { solveLeg } from "../anim/leg-ik";
+import {
+  buildCatEarGeometry,
+  buildCatEarInnerGeometry,
+  buildCatJawGeometry,
+  buildCatLegGeometry,
+  buildCatNeckHeadGeometry,
+  buildCatNoseGeometry,
+  buildCatPawGeometry,
+  buildCatTailGeometry,
+  buildCatTorsoGeometry,
+  type CatCoatColors,
+} from "./cat-geometry";
 
 /**
  * Anatomically-ordered cat rig.
@@ -24,6 +36,8 @@ export interface CatLegRig {
   readonly lower: THREE.Object3D;
   /** Metatarsus / pastern. Child pivot at the end of `lower`. */
   readonly foot: THREE.Object3D;
+  /** Terminal paw. Kept level in stance instead of inheriting the hock angle. */
+  readonly paw: THREE.Object3D;
   readonly upperLength: number;
   readonly lowerLength: number;
   readonly footLength: number;
@@ -46,23 +60,29 @@ export interface CatRig {
   readonly root: THREE.Group;
   /** Whole-body offset: ride height, squash, lean, landing absorb. */
   readonly body: THREE.Group;
-  readonly pelvis: THREE.Group;
-  readonly spineLower: THREE.Group;
-  readonly spineUpper: THREE.Group;
-  readonly chest: THREE.Group;
-  readonly neck: THREE.Group;
-  readonly head: THREE.Group;
+  readonly pelvis: THREE.Bone;
+  readonly spineLower: THREE.Bone;
+  readonly spineUpper: THREE.Bone;
+  readonly chest: THREE.Bone;
+  readonly neck: THREE.Bone;
+  readonly head: THREE.Bone;
   readonly jaw: THREE.Group;
   readonly earLeft: THREE.Group;
   readonly earRight: THREE.Group;
   readonly eyeLeft: THREE.Mesh;
   readonly eyeRight: THREE.Mesh;
+  readonly pupilLeft: THREE.Mesh;
+  readonly pupilRight: THREE.Mesh;
   readonly eyelidLeft: THREE.Mesh;
   readonly eyelidRight: THREE.Mesh;
-  readonly ribcage: THREE.Mesh;
-  readonly tailBase: THREE.Group;
+  /** The continuous skinned torso; retained as `ribcage` for rig compatibility. */
+  readonly ribcage: THREE.SkinnedMesh;
+  readonly scapulaLeft: THREE.Group;
+  readonly scapulaRight: THREE.Group;
+  readonly tailBase: THREE.Bone;
   /** Tail joints, root first. Driven by a verlet chain. */
-  readonly tailJoints: readonly THREE.Group[];
+  readonly tailJoints: readonly THREE.Bone[];
+  readonly tailMesh: THREE.SkinnedMesh;
   readonly tailSegmentLength: number;
   readonly legs: readonly CatLegRig[];
   /** Carry socket, in front of the jaw. */
@@ -93,25 +113,25 @@ interface LegSpec {
  */
 const LEG_SPECS: readonly LegSpec[] = [
   {
-    id: "hind-left", root: [-0.108, 0.035, -0.25], upperLength: 0.152, lowerLength: 0.152, footLength: 0.115,
-    bend: -1, phaseOffset: 0, isFront: false, side: -1, restZ: -0.32,
+    id: "hind-left", root: [-0.103, 0.068, -0.245], upperLength: 0.19, lowerLength: 0.17, footLength: 0.108,
+    bend: -1, phaseOffset: 0, isFront: false, side: -1, restZ: -0.215,
   },
   {
-    id: "front-left", root: [-0.1, 0.02, 0.245], upperLength: 0.14, lowerLength: 0.135, footLength: 0.09,
+    id: "front-left", root: [-0.096, 0.052, 0.24], upperLength: 0.16, lowerLength: 0.155, footLength: 0.085,
     bend: 1, phaseOffset: 0.25, isFront: true, side: -1, restZ: 0.25,
   },
   {
-    id: "hind-right", root: [0.108, 0.035, -0.25], upperLength: 0.152, lowerLength: 0.152, footLength: 0.115,
-    bend: -1, phaseOffset: 0.5, isFront: false, side: 1, restZ: -0.32,
+    id: "hind-right", root: [0.103, 0.068, -0.245], upperLength: 0.19, lowerLength: 0.17, footLength: 0.108,
+    bend: -1, phaseOffset: 0.5, isFront: false, side: 1, restZ: -0.215,
   },
   {
-    id: "front-right", root: [0.1, 0.02, 0.245], upperLength: 0.14, lowerLength: 0.135, footLength: 0.09,
+    id: "front-right", root: [0.096, 0.052, 0.24], upperLength: 0.16, lowerLength: 0.155, footLength: 0.085,
     bend: 1, phaseOffset: 0.75, isFront: true, side: 1, restZ: 0.25,
   },
 ];
 
-const TAIL_SEGMENTS = 9;
-const TAIL_SEGMENT_LENGTH = 0.066;
+const TAIL_SEGMENTS = 12;
+const TAIL_SEGMENT_LENGTH = 0.052;
 const STAND_HEIGHT = 0.315;
 
 export interface CatAppearance {
@@ -128,12 +148,21 @@ export function buildCat(appearance: CatAppearance = {}): CatRig {
   const eyeColor = appearance.eye ?? PALETTE.eye;
 
   const fur = surface(furColor, { roughness: FUR_ROUGHNESS });
-  const furShade = surface(shadeColor, { roughness: FUR_ROUGHNESS });
-  const belly = surface(bellyColor, { roughness: FUR_ROUGHNESS });
+  const coat = surface(0xffffff, { roughness: FUR_ROUGHNESS, vertexColors: true });
   const nose = surface(PALETTE.nose, { roughness: 0.6 });
-  const iris = surface(eyeColor, { roughness: 0.22, emissive: eyeColor, emissiveIntensity: 0.16 });
+  const muzzleFur = surface(
+    new THREE.Color(furColor).lerp(new THREE.Color(bellyColor), 0.42).getHex(),
+    { roughness: FUR_ROUGHNESS },
+  );
+  const earSkin = surface(
+    new THREE.Color(PALETTE.nose).lerp(new THREE.Color(furColor), 0.24).getHex(),
+    { roughness: 0.84 },
+  );
+  const iris = surface(eyeColor, { roughness: 0.28 });
   const pupil = surface(0x14120f, { roughness: 0.2 });
-  const whisker = surface(0xe9e2d2, { roughness: 0.5 });
+  const catchlight = surface(0xfff8df, { roughness: 0.18, emissive: 0xfff8df, emissiveIntensity: 0.14 });
+  const mouthInterior = surface(0x321c1d, { roughness: 0.92 });
+  const coatColors: CatCoatColors = { fur: furColor, shade: shadeColor, belly: bellyColor };
 
   const root = new THREE.Group();
   root.name = "cat";
@@ -143,208 +172,253 @@ export function buildCat(appearance: CatAppearance = {}): CatRig {
   body.position.y = STAND_HEIGHT;
   root.add(body);
 
-  // ---- Spine chain: pelvis at the rear, chest at the front ------------------
-  const pelvis = new THREE.Group();
+  // ---- Spine and one continuous deforming hide -----------------------------
+  const pelvis = new THREE.Bone();
   pelvis.name = "pelvis";
   pelvis.position.set(0, 0, -0.235);
   body.add(pelvis);
 
-  const hip = new THREE.Mesh(new THREE.SphereGeometry(0.142, 12, 8), fur);
-  hip.scale.set(1.0, 0.98, 1.02);
-  hip.castShadow = true;
-  pelvis.add(hip);
-
-  const spineLower = new THREE.Group();
+  const spineLower = new THREE.Bone();
   spineLower.name = "spine-lower";
   spineLower.position.set(0, 0.006, 0.155);
   pelvis.add(spineLower);
 
-  const waist = new THREE.Mesh(new THREE.CapsuleGeometry(0.128, 0.17, 4, 12), fur);
-  waist.rotation.x = Math.PI / 2;
-  waist.position.set(0, 0.004, 0.055);
-  waist.castShadow = true;
-  spineLower.add(waist);
-
-  const loin = new THREE.Mesh(new THREE.SphereGeometry(0.126, 12, 10), fur);
-  loin.scale.set(1.0, 0.98, 1.18);
-  loin.position.set(0, 0.004, 0.11);
-  spineLower.add(loin);
-
-  const spineUpper = new THREE.Group();
+  const spineUpper = new THREE.Bone();
   spineUpper.name = "spine-upper";
   spineUpper.position.set(0, 0.004, 0.155);
   spineLower.add(spineUpper);
 
-  const chest = new THREE.Group();
+  const chest = new THREE.Bone();
   chest.name = "chest";
   chest.position.set(0, 0.01, 0.135);
   spineUpper.add(chest);
 
-  const ribcage = new THREE.Mesh(new THREE.SphereGeometry(0.148, 14, 10), fur);
+  const ribcage = new THREE.SkinnedMesh(buildCatTorsoGeometry(coatColors), coat);
   ribcage.name = "ribcage";
-  ribcage.scale.set(0.99, 1.0, 1.34);
-  ribcage.position.z = -0.01;
+  ribcage.frustumCulled = false;
   ribcage.castShadow = true;
-  chest.add(ribcage);
+  ribcage.receiveShadow = true;
+  body.add(ribcage);
 
-  const shoulderBlade = new THREE.Mesh(new THREE.SphereGeometry(0.098, 10, 8), fur);
-  shoulderBlade.scale.set(0.62, 0.92, 1.05);
+  root.updateMatrixWorld(true);
+  ribcage.bind(
+    new THREE.Skeleton([pelvis, spineLower, spineUpper, chest]),
+    ribcage.matrixWorld.clone(),
+  );
+
+  // Named scapular anchors keep stride-driven shoulder timing explicit. The
+  // actual surface landmark comes from the raised withers and the buried flare
+  // of each continuous front-leg skin, avoiding stuck-on shoulder patches.
+  const scapulae: THREE.Group[] = [];
   for (const side of [-1, 1] as const) {
-    const blade = shoulderBlade.clone();
-    blade.position.set(side * 0.072, 0.028, 0.055);
-    chest.add(blade);
+    const scapula = new THREE.Group();
+    scapula.name = side < 0 ? "scapula-left" : "scapula-right";
+    scapula.position.set(side * 0.113, 0.108, 0.005);
+    chest.add(scapula);
+    scapulae.push(scapula);
   }
 
-  // Scruff: bridges chest to neck so the silhouette has no seam at the shoulders.
-  const scruff = new THREE.Mesh(new THREE.SphereGeometry(0.118, 12, 10), fur);
-  scruff.scale.set(0.94, 0.86, 0.9);
-  scruff.position.set(0, 0.052, 0.108);
-  chest.add(scruff);
-
-  const bib = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), belly);
-  bib.scale.set(0.82, 0.86, 0.62);
-  bib.position.set(0, -0.05, 0.11);
-  chest.add(bib);
-
-  const underbelly = new THREE.Mesh(new THREE.CapsuleGeometry(0.086, 0.3, 4, 10), belly);
-  underbelly.rotation.x = Math.PI / 2;
-  underbelly.position.set(0, -0.072, -0.06);
-  chest.add(underbelly);
-
   // ---- Neck and head -------------------------------------------------------
-  const neck = new THREE.Group();
+  const neck = new THREE.Bone();
   neck.name = "neck";
-  neck.position.set(0, 0.072, 0.108);
+  neck.position.set(0, 0.055, 0.11);
   chest.add(neck);
 
-  const neckMesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.078, 0.07, 4, 10), fur);
-  neckMesh.rotation.x = Math.PI / 2.6;
-  neckMesh.position.set(0, 0.03, 0.052);
-  neck.add(neckMesh);
-
-  const head = new THREE.Group();
+  const head = new THREE.Bone();
   head.name = "head";
-  head.position.set(0, 0.082, 0.104);
+  head.position.set(0, 0.06, 0.115);
   neck.add(head);
 
-  const skull = new THREE.Mesh(new THREE.SphereGeometry(0.104, 16, 12), fur);
-  skull.scale.set(1.04, 0.96, 1.0);
-  skull.castShadow = true;
-  head.add(skull);
+  // A single two-bone skin spans the nape, throat, crown, cheeks, and muzzle.
+  // It is a sibling of the neck bone, so neck rotation deforms the surface
+  // exactly once while the facial features continue to follow `head`.
+  const headSkin = new THREE.SkinnedMesh(buildCatNeckHeadGeometry(coatColors), coat);
+  headSkin.name = "head-skin";
+  headSkin.position.copy(neck.position);
+  headSkin.frustumCulled = false;
+  headSkin.castShadow = true;
+  headSkin.receiveShadow = true;
+  chest.add(headSkin);
+  root.updateMatrixWorld(true);
+  headSkin.bind(new THREE.Skeleton([neck, head]), headSkin.matrixWorld.clone());
 
-  const cheeks = new THREE.Mesh(new THREE.SphereGeometry(0.082, 10, 8), fur);
-  cheeks.scale.set(1.16, 0.72, 0.78);
-  cheeks.position.set(0, -0.032, 0.05);
-  head.add(cheeks);
+  // Cats have a short, restrained muzzle whose whisker pads swell out of the
+  // cheeks. Their shallow depth keeps the face soft and broad, not fox-like.
+  for (const side of [-1, 1] as const) {
+    const pad = new THREE.Mesh(new THREE.SphereGeometry(0.028, 16, 10), muzzleFur);
+    pad.scale.set(1.14, 0.53, 0.28);
+    pad.position.set(side * 0.02, -0.033, 0.098);
+    pad.castShadow = true;
+    head.add(pad);
+  }
 
-  const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.055, 10, 8), belly);
-  muzzle.scale.set(1.16, 0.8, 0.92);
-  muzzle.position.set(0, -0.036, 0.086);
-  head.add(muzzle);
-
-  const noseMesh = new THREE.Mesh(new THREE.SphereGeometry(0.017, 8, 6), nose);
-  noseMesh.scale.set(1.25, 0.85, 0.8);
-  noseMesh.position.set(0, -0.014, 0.128);
+  const noseMesh = new THREE.Mesh(buildCatNoseGeometry(), nose);
+  noseMesh.scale.setScalar(0.7);
+  noseMesh.position.set(0, -0.017, 0.111);
+  noseMesh.castShadow = true;
   head.add(noseMesh);
 
   const jaw = new THREE.Group();
   jaw.name = "jaw";
-  jaw.position.set(0, -0.044, 0.032);
+  jaw.position.set(0, -0.051, 0.06);
+
+  // A recessed pocket is revealed by the articulated jaw during a meow; in a
+  // closed mouth it stays behind the lips instead of outlining the chin.
+  const mouthCavity = new THREE.Mesh(new THREE.SphereGeometry(0.024, 10, 5), mouthInterior);
+  mouthCavity.name = "mouth-cavity";
+  mouthCavity.scale.set(0.66, 0.22, 0.16);
+  mouthCavity.position.set(0, -0.041, 0.094);
+  head.add(mouthCavity);
+
   head.add(jaw);
 
-  const jawMesh = new THREE.Mesh(new THREE.SphereGeometry(0.046, 10, 6), belly);
-  jawMesh.scale.set(1.05, 0.5, 1.15);
-  jawMesh.position.set(0, -0.008, 0.046);
+  const jawMesh = new THREE.Mesh(buildCatJawGeometry(), muzzleFur);
+  jawMesh.scale.set(0.56, 0.44, 0.52);
+  jawMesh.position.set(0, 0.004, 0.012);
+  jawMesh.castShadow = true;
   jaw.add(jawMesh);
 
   const ears: THREE.Group[] = [];
   const eyes: THREE.Mesh[] = [];
+  const pupils: THREE.Mesh[] = [];
   const eyelids: THREE.Mesh[] = [];
-  const earShell = new THREE.ConeGeometry(0.052, 0.098, 5);
-  const earInner = new THREE.ConeGeometry(0.032, 0.066, 5);
+  const earShell = buildCatEarGeometry();
+  const earInner = buildCatEarInnerGeometry();
+  const eyelidShell = new THREE.SphereGeometry(0.0225, 12, 8);
+  const whiskerLine = new THREE.LineBasicMaterial({ color: 0xeee5d4, transparent: true, opacity: 0.58 });
 
   for (const side of [-1, 1] as const) {
     const ear = new THREE.Group();
     ear.name = side < 0 ? "ear-left" : "ear-right";
-    ear.position.set(side * 0.064, 0.072, 0.012);
-    ear.rotation.z = side * -0.2;
-    ear.rotation.x = -0.12;
+    // The broad base is buried through the side of the crown. The larger
+    // pinnae then read as part of the skull silhouette, not cones balanced on
+    // top of it.
+    ear.position.set(side * 0.064, 0.045, -0.024);
+    ear.scale.set(1.12, 1.24, 1.08);
+    ear.rotation.z = side * -0.19;
+    ear.rotation.x = -0.08;
     head.add(ear);
 
     const shell = new THREE.Mesh(earShell, fur);
-    shell.position.y = 0.049;
-    shell.scale.set(1, 1, 0.62);
     shell.castShadow = true;
     ear.add(shell);
 
-    const inner = new THREE.Mesh(earInner, nose);
-    inner.position.set(0, 0.043, 0.016);
-    inner.scale.set(1, 1, 0.5);
+    const inner = new THREE.Mesh(earInner, earSkin);
     ear.add(inner);
 
     ears.push(ear);
 
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.026, 10, 8), iris);
+    // A dark limbal rim under a compressed iris gives an almond opening. The
+    // modest vertical scale keeps the expression bright without googly eyes.
+    const eyeTilt = side * 0.075;
+    const socket = new THREE.Mesh(new THREE.SphereGeometry(0.022, 16, 10), pupil);
+    socket.name = side < 0 ? "eye-socket-left" : "eye-socket-right";
+    socket.scale.set(1.25, 0.86, 0.34);
+    socket.position.set(side * 0.047, 0.014, 0.087);
+    socket.rotation.z = eyeTilt;
+    head.add(socket);
+
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.0215, 16, 10), iris);
     eye.name = side < 0 ? "eye-left" : "eye-right";
-    eye.scale.set(1, 1, 0.66);
-    eye.position.set(side * 0.048, 0.006, 0.086);
+    eye.scale.set(1.22, 0.78, 0.34);
+    eye.position.set(side * 0.047, 0.014, 0.09);
+    eye.rotation.z = eyeTilt;
     head.add(eye);
     eyes.push(eye);
 
-    const slit = new THREE.Mesh(new THREE.SphereGeometry(0.0165, 6, 5), pupil);
-    slit.scale.set(0.4, 1.24, 0.5);
-    slit.position.set(side * 0.048, 0.006, 0.104);
+    const slit = new THREE.Mesh(new THREE.SphereGeometry(0.011, 10, 8), pupil);
+    slit.name = side < 0 ? "pupil-left" : "pupil-right";
+    slit.scale.set(0.34, 1.15, 0.18);
+    slit.position.set(side * 0.047, 0.014, 0.096);
     head.add(slit);
+    pupils.push(slit);
+
+    const glint = new THREE.Mesh(new THREE.SphereGeometry(0.0024, 6, 5), catchlight);
+    glint.name = side < 0 ? "catchlight-left" : "catchlight-right";
+    // Both highlights share one screen-space light direction. Mirroring them
+    // towards the nose made the old gaze read as cross-eyed.
+    glint.position.set(side * 0.047 - 0.004, 0.022, 0.0985);
+    head.add(glint);
 
     // Eyelid: a fur-coloured cap scaled down to zero except while blinking.
-    const eyelid = new THREE.Mesh(new THREE.SphereGeometry(0.03, 8, 6), furShade);
+    const eyelid = new THREE.Mesh(eyelidShell, fur);
     eyelid.name = side < 0 ? "eyelid-left" : "eyelid-right";
-    eyelid.position.set(side * 0.048, 0.008, 0.085);
-    eyelid.scale.set(1, 0.02, 0.7);
+    // The shell sits mostly inside the brow. It remains a fine upper-lid line
+    // while open, then grows in front of the recessed pupil and highlight for
+    // a blink without becoming a pair of pasted-on fur ovals.
+    eyelid.position.set(side * 0.047, 0.018, 0.094);
+    eyelid.scale.set(1.25, 0.02, 0.36);
+    eyelid.rotation.z = eyeTilt;
     head.add(eyelid);
     eyelids.push(eyelid);
 
     for (let index = 0; index < 3; index += 1) {
-      const hairMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.0014, 0.0009, 0.115, 3), whisker);
-      hairMesh.position.set(side * 0.042, -0.018 + index * 0.011, 0.104);
-      hairMesh.rotation.z = side * (Math.PI / 2 - 0.28 - index * 0.12);
-      hairMesh.rotation.x = -0.22 + index * 0.14;
-      head.add(hairMesh);
+      const y = -0.031 + index * 0.01;
+      const start = new THREE.Vector3(side * 0.038, y, 0.102);
+      const control = new THREE.Vector3(
+        side * (0.086 + index * 0.007),
+        y + (index - 1) * 0.004,
+        0.109,
+      );
+      const end = new THREE.Vector3(
+        side * (0.138 + index * 0.012),
+        y + (index - 1) * 0.011,
+        0.108 - index * 0.004,
+      );
+      const geometry = new THREE.BufferGeometry().setFromPoints(
+        new THREE.QuadraticBezierCurve3(start, control, end).getPoints(6),
+      );
+      head.add(new THREE.Line(geometry, whiskerLine));
     }
   }
 
+  const mouthLine = new THREE.LineBasicMaterial({ color: 0x3a2722, transparent: true, opacity: 0.78 });
+  const mouth = new THREE.LineSegments(
+    new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, -0.026, 0.116),
+      new THREE.Vector3(0, -0.038, 0.112),
+      new THREE.Vector3(0, -0.038, 0.112),
+      new THREE.Vector3(-0.015, -0.036, 0.108),
+      new THREE.Vector3(0, -0.038, 0.112),
+      new THREE.Vector3(0.015, -0.036, 0.108),
+    ]),
+    mouthLine,
+  );
+  head.add(mouth);
+
   const mouthAnchor = new THREE.Object3D();
   mouthAnchor.name = "mouth-anchor";
-  mouthAnchor.position.set(0, -0.02, 0.15);
+  mouthAnchor.position.set(0, -0.018, 0.084);
   jaw.add(mouthAnchor);
 
   // ---- Tail ----------------------------------------------------------------
-  const tailBase = new THREE.Group();
+  const tailBase = new THREE.Bone();
   tailBase.name = "tail-base";
-  tailBase.position.set(0, 0.108, -0.145);
+  // The root is buried slightly inside the lofted rump. The visible tail skin
+  // begins wider than the chain and makes this a continuous sacrum-to-tip line.
+  tailBase.position.set(0, 0.09, -0.105);
   pelvis.add(tailBase);
 
-  const tailJoints: THREE.Group[] = [];
-  let tailParent: THREE.Group = tailBase;
+  const tailJoints: THREE.Bone[] = [];
+  let tailParent: THREE.Bone = tailBase;
   for (let index = 0; index < TAIL_SEGMENTS; index += 1) {
-    const joint = new THREE.Group();
+    const joint = new THREE.Bone();
     joint.name = `tail-${index}`;
     joint.position.set(0, 0, index === 0 ? 0 : -TAIL_SEGMENT_LENGTH);
     tailParent.add(joint);
-
-    const taper = 1 - index / (TAIL_SEGMENTS + 2.5);
-    const segment = new THREE.Mesh(
-      new THREE.CapsuleGeometry(0.026 * taper, TAIL_SEGMENT_LENGTH * 0.95, 3, 6),
-      index >= TAIL_SEGMENTS - 3 ? furShade : fur,
-    );
-    segment.rotation.x = Math.PI / 2;
-    segment.position.z = -TAIL_SEGMENT_LENGTH / 2;
-    segment.castShadow = true;
-    joint.add(segment);
-
     tailJoints.push(joint);
     tailParent = joint;
   }
+
+  const tailMesh = new THREE.SkinnedMesh(buildCatTailGeometry(TAIL_SEGMENTS, TAIL_SEGMENT_LENGTH, coatColors), coat);
+  tailMesh.name = "tail-skin";
+  tailMesh.frustumCulled = false;
+  tailMesh.castShadow = true;
+  tailBase.add(tailMesh);
+  root.updateMatrixWorld(true);
+  // The sacral socket is the first skin bone. Its root-weighted ring stays
+  // seated in the rump while the tail-0 blend begins the simulated curve.
+  tailMesh.bind(new THREE.Skeleton([tailBase, ...tailJoints]), tailMesh.matrixWorld.clone());
 
   // ---- Legs ----------------------------------------------------------------
   // Leg roots are authored in body space, but shoulders parent to `chest` and
@@ -353,6 +427,8 @@ export function buildCat(appearance: CatAppearance = {}): CatRig {
   const chestOffset = new THREE.Vector3()
     .add(pelvis.position).add(spineLower.position).add(spineUpper.position).add(chest.position);
   const pelvisOffset = pelvis.position.clone();
+  const legGeometries = new Map<boolean, THREE.BufferGeometry>();
+  const pawGeometries = new Map<boolean, THREE.BufferGeometry>();
 
   const legs: CatLegRig[] = LEG_SPECS.map((spec) => {
     const legRoot = new THREE.Group();
@@ -365,31 +441,78 @@ export function buildCat(appearance: CatAppearance = {}): CatRig {
     );
     (spec.isFront ? chest : pelvis).add(legRoot);
 
-    const upper = new THREE.Group();
+    // This stationary socket keeps the buried shoulder/hip rings attached to
+    // the torso while the upper limb rotates beneath them.
+    const socket = new THREE.Bone();
+    socket.name = `${spec.id}-socket`;
+    legRoot.add(socket);
+
+    const upper = new THREE.Bone();
     upper.name = `${spec.id}-upper`;
     legRoot.add(upper);
-    upper.add(limbMesh(spec.upperLength, spec.isFront ? 0.068 : 0.078, spec.isFront ? 0.05 : 0.052, fur));
-    upper.add(jointCap(spec.isFront ? 0.066 : 0.076, fur, 0));
 
-    const lower = new THREE.Group();
+    const lower = new THREE.Bone();
     lower.name = `${spec.id}-lower`;
     lower.position.y = -spec.upperLength;
     upper.add(lower);
-    lower.add(limbMesh(spec.lowerLength, spec.isFront ? 0.046 : 0.05, 0.032, fur));
-    lower.add(jointCap(spec.isFront ? 0.048 : 0.052, fur, 0));
 
-    const foot = new THREE.Group();
+    const foot = new THREE.Bone();
     foot.name = `${spec.id}-foot`;
     foot.position.y = -spec.lowerLength;
     lower.add(foot);
-    foot.add(limbMesh(spec.footLength, 0.032, 0.03, fur));
-    foot.add(jointCap(0.034, fur, 0));
 
-    const toes = new THREE.Mesh(new THREE.SphereGeometry(0.042, 8, 6), furShade);
-    toes.scale.set(0.92, 0.58, 1.2);
-    toes.position.set(0, -spec.footLength + 0.014, 0.019);
-    toes.castShadow = true;
-    foot.add(toes);
+    const paw = new THREE.Bone();
+    paw.name = `${spec.id}-paw`;
+    paw.position.y = -spec.footLength;
+    foot.add(paw);
+
+    let legGeometry = legGeometries.get(spec.isFront);
+    if (!legGeometry) {
+      legGeometry = buildCatLegGeometry({
+        upper: {
+          length: spec.upperLength,
+          root: spec.isFront ? [0.04, 0.043] : [0.054, 0.062],
+          muscle: spec.isFront ? [0.042, 0.047] : [0.06, 0.066],
+          muscleAt: spec.isFront ? 0.24 : 0.3,
+          joint: spec.isFront ? [0.03, 0.033] : [0.037, 0.043],
+          stripes: spec.isFront ? [0.22, 0.43] : [0.24, 0.46],
+        },
+        lower: {
+          length: spec.lowerLength,
+          root: spec.isFront ? [0.032, 0.035] : [0.039, 0.045],
+          muscle: spec.isFront ? [0.031, 0.034] : [0.037, 0.043],
+          muscleAt: 0.2,
+          joint: spec.isFront ? [0.021, 0.024] : [0.024, 0.029],
+          stripes: [0.2, 0.42],
+        },
+        foot: {
+          length: spec.footLength,
+          root: [0.026, 0.029],
+          muscle: [0.024, 0.027],
+          muscleAt: 0.22,
+          joint: [0.018, 0.02],
+          stripes: [0.38],
+        },
+        footEndInset: 0.02,
+      }, coatColors);
+      legGeometries.set(spec.isFront, legGeometry);
+    }
+    const legSkin = new THREE.SkinnedMesh(legGeometry, coat);
+    legSkin.name = `${spec.id}-skin`;
+    legSkin.frustumCulled = false;
+    legSkin.castShadow = true;
+    legRoot.add(legSkin);
+    root.updateMatrixWorld(true);
+    legSkin.bind(new THREE.Skeleton([socket, upper, lower, foot]), legSkin.matrixWorld.clone());
+
+    let pawGeometry = pawGeometries.get(spec.isFront);
+    if (!pawGeometry) {
+      pawGeometry = buildCatPawGeometry(coatColors, spec.isFront);
+      pawGeometries.set(spec.isFront, pawGeometry);
+    }
+    const pawMesh = new THREE.Mesh(pawGeometry, coat);
+    pawMesh.castShadow = true;
+    paw.add(pawMesh);
 
     return {
       id: spec.id,
@@ -397,11 +520,12 @@ export function buildCat(appearance: CatAppearance = {}): CatRig {
       upper,
       lower,
       foot,
+      paw,
       upperLength: spec.upperLength,
       lowerLength: spec.lowerLength,
       footLength: spec.footLength,
       bend: spec.bend,
-      restTarget: new THREE.Vector3(spec.root[0] * 1.02, -STAND_HEIGHT, spec.restZ),
+      restTarget: new THREE.Vector3(spec.side * (spec.isFront ? 0.082 : 0.088), -STAND_HEIGHT, spec.restZ),
       bodyOffset: new THREE.Vector3(spec.root[0], spec.root[1], spec.root[2]),
       phaseOffset: spec.phaseOffset,
       isFront: spec.isFront,
@@ -418,11 +542,19 @@ export function buildCat(appearance: CatAppearance = {}): CatRig {
 
   const eyeLeft = eyes[0];
   const eyeRight = eyes[1];
+  const pupilLeft = pupils[0];
+  const pupilRight = pupils[1];
   const eyelidLeft = eyelids[0];
   const eyelidRight = eyelids[1];
   const earLeft = ears[0];
   const earRight = ears[1];
-  if (!eyeLeft || !eyeRight || !eyelidLeft || !eyelidRight || !earLeft || !earRight) {
+  const scapulaLeft = scapulae[0];
+  const scapulaRight = scapulae[1];
+  if (
+    !eyeLeft || !eyeRight || !pupilLeft || !pupilRight
+    || !eyelidLeft || !eyelidRight || !earLeft || !earRight
+    || !scapulaLeft || !scapulaRight
+  ) {
     throw new Error("Cat rig failed to build its paired features.");
   }
 
@@ -440,32 +572,20 @@ export function buildCat(appearance: CatAppearance = {}): CatRig {
     earRight,
     eyeLeft,
     eyeRight,
+    pupilLeft,
+    pupilRight,
     eyelidLeft,
     eyelidRight,
     ribcage,
+    scapulaLeft,
+    scapulaRight,
     tailBase,
     tailJoints,
+    tailMesh,
     tailSegmentLength: TAIL_SEGMENT_LENGTH,
     legs,
     mouthAnchor,
     standHeight: STAND_HEIGHT,
-    collisionRadius: 0.3,
+    collisionRadius: 0.19,
   };
-}
-
-/** A sphere at a joint pivot, hiding the flat end caps of adjacent segments. */
-function jointCap(radius: number, material: THREE.Material, offsetY: number): THREE.Mesh {
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 8, 6), material);
-  mesh.position.y = offsetY;
-  mesh.castShadow = true;
-  return mesh;
-}
-
-/** A tapered capsule hanging downwards from its pivot. */
-function limbMesh(length: number, topRadius: number, bottomRadius: number, material: THREE.Material): THREE.Mesh {
-  const geometry = new THREE.CylinderGeometry(topRadius, bottomRadius, length, 6, 1, false);
-  geometry.translate(0, -length / 2, 0);
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.castShadow = true;
-  return mesh;
 }

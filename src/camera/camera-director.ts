@@ -1,14 +1,15 @@
 import * as THREE from "three";
-import { CAMERA_ZONES, type CameraZoneSpec, type RoomId } from "../level/level-data";
+import { CAMERA_ZONES, type CameraZoneId, type CameraZoneSpec } from "../level/level-data";
 import { selectCameraZone } from "../core/gameplay";
 import { clamp, damp, deadZoneOffset } from "../core/math";
 
 /**
  * Semi-fixed diorama cameras.
  *
- * Each room has one authored composition. The camera tracks only once the cat
- * leaves a dead zone, leads slightly in the direction of travel, and blends
- * between rooms with hysteresis so a doorway never causes zone flicker.
+ * Rooms have authored compositions, with an additional close composition for
+ * the utility edge. The camera tracks only once the cat leaves a dead zone,
+ * leads slightly in the direction of travel, and blends between zones with
+ * hysteresis so thresholds never flicker.
  *
  * It also exposes the movement basis it is currently using. Blending that basis
  * separately from the view is what stops held input from reversing direction
@@ -31,7 +32,7 @@ export class CameraDirector {
 
   private zoneChanged = false;
 
-  constructor(private readonly camera: THREE.PerspectiveCamera, startZone: RoomId = "garden") {
+  constructor(private readonly camera: THREE.PerspectiveCamera, startZone: CameraZoneId = "garden") {
     const found = CAMERA_ZONES.find((candidate) => candidate.id === startZone);
     if (!found) throw new Error(`No camera zone for room "${startZone}".`);
     this.zone = found;
@@ -48,7 +49,7 @@ export class CameraDirector {
     this.refreshBasis(1);
   }
 
-  currentZoneId(): RoomId {
+  currentZoneId(): CameraZoneId {
     return this.zone.id;
   }
 
@@ -71,9 +72,9 @@ export class CameraDirector {
     return target.copy(this.basisRight);
   }
 
-  /** Re-evaluates which room owns the camera, applying threshold hysteresis. */
-  updateZone(catX: number): void {
-    const next = selectCameraZone(this.zone.id, catX) as RoomId;
+  /** Re-evaluates which composition owns the camera, applying threshold hysteresis. */
+  updateZone(catX: number, catZ: number): void {
+    const next = selectCameraZone(this.zone.id, catX, catZ) as CameraZoneId;
     if (next === this.zone.id) return;
     const found = CAMERA_ZONES.find((candidate) => candidate.id === next);
     if (!found) return;

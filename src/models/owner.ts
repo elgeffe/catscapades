@@ -54,23 +54,16 @@ export function buildOwner(): OwnerRig {
   hips.add(torso);
 
   const chest = new THREE.Mesh(new THREE.CapsuleGeometry(0.29, 0.42, 6, 14), shirt);
+  chest.name = "torso-shell";
   chest.position.y = 0.34;
   chest.scale.z = 0.78;
   chest.castShadow = true;
   torso.add(chest);
 
   const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.2, 0.09, 12), shirt);
+  collar.name = "shirt-collar";
   collar.position.y = 0.63;
   torso.add(collar);
-
-  // Hugs the torso rather than floating in front of it.
-  const apron = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.58, 0.14), surface(0xc9b48c, { roughness: 1 }));
-  apron.position.set(0, 0.24, 0.16);
-  apron.scale.z = 0.9;
-  torso.add(apron);
-  const apronStrap = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.05, 0.1), surface(0xb9a175, { roughness: 1 }));
-  apronStrap.position.set(0, 0.52, 0.17);
-  torso.add(apronStrap);
 
   const neck = new THREE.Group();
   neck.name = "neck";
@@ -92,9 +85,10 @@ export function buildOwner(): OwnerRig {
   head.add(skull);
 
   const hairCap = new THREE.Mesh(
-    new THREE.SphereGeometry(0.228, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.62),
+    new THREE.SphereGeometry(0.228, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.4),
     hair,
   );
+  hairCap.name = "hair-crown";
   hairCap.position.y = 0.17;
   hairCap.scale.set(0.96, 1.08, 1.02);
   head.add(hairCap);
@@ -104,6 +98,7 @@ export function buildOwner(): OwnerRig {
 
   for (const side of [-1, 1] as const) {
     const eye = new THREE.Mesh(new THREE.SphereGeometry(0.028, 10, 8), surface(0x2b2521, { roughness: 0.3 }));
+    eye.name = side < 0 ? "eye-left" : "eye-right";
     eye.position.set(side * 0.085, 0.17, 0.195);
     eye.scale.z = 0.5;
     head.add(eye);

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  CAMERA_ZONES, JUMP_TARGETS, OWNER_ROUTINE, PLACEMENTS, PROPS, STATIONS, WALLS, WORLD,
+  CAMERA_ZONES, JUMP_TARGETS, OWNER_ROUTINE, PLACEMENTS, PROPS, SINK_BASIN, STATIONS, WALLS, WORLD,
 } from "./level-data";
-import { SURFACE_HEIGHTS } from "../models/furniture";
+import { SINK_BASIN_GEOMETRY, SURFACE_HEIGHTS } from "../models/furniture";
 import { selectCameraZone } from "../core/gameplay";
 
 /**
@@ -87,6 +87,19 @@ describe("level data", () => {
     }
   });
 
+  it("aligns the sock-drop target with the visible sink bowl", () => {
+    const sink = PLACEMENTS.find((placement) => placement.id === "sink");
+    expect(sink?.model).toBe("sink-unit");
+    expect(SINK_BASIN.position[0]).toBeCloseTo(
+      sink!.position[0] + SINK_BASIN_GEOMETRY.centerX,
+    );
+    expect(SINK_BASIN.position[2]).toBeCloseTo(
+      sink!.position[2] + SINK_BASIN_GEOMETRY.centerZ,
+    );
+    expect(SINK_BASIN.position[1]).toBeGreaterThan(SINK_BASIN_GEOMETRY.bottom);
+    expect(SINK_BASIN.position[1]).toBeLessThan(SINK_BASIN_GEOMETRY.rim);
+  });
+
   it("places every carryable prop where the cat can get to it", () => {
     for (const prop of PROPS.filter((candidate) => candidate.carryable)) {
       if (prop.position[1] < 0.4) continue;
@@ -98,12 +111,14 @@ describe("level data", () => {
     }
   });
 
-  it("defines one camera zone per room and reaches all of them", () => {
-    expect(CAMERA_ZONES).toHaveLength(3);
-    expect(selectCameraZone("garden", 0)).toBe("kitchen");
-    expect(selectCameraZone("kitchen", 10)).toBe("dining");
-    expect(selectCameraZone("dining", 0)).toBe("kitchen");
-    expect(selectCameraZone("kitchen", -10)).toBe("garden");
+  it("covers every room and gives the utility edge its own composition", () => {
+    expect(CAMERA_ZONES).toHaveLength(4);
+    expect(selectCameraZone("garden", 0, 0)).toBe("kitchen");
+    expect(selectCameraZone("kitchen", 10, 0)).toBe("dining");
+    expect(selectCameraZone("dining", 0, 0)).toBe("kitchen");
+    expect(selectCameraZone("kitchen", -10, 0)).toBe("garden");
+    expect(selectCameraZone("kitchen", 5, 5.1)).toBe("utility");
+    expect(CAMERA_ZONES.find((zone) => zone.id === "utility")?.target[2]).toBeGreaterThan(5);
   });
 
   it("opens both interior partitions so the rooms actually connect", () => {
@@ -113,6 +128,16 @@ describe("level data", () => {
         expect(gap.to - gap.from, `opening at ${wall.at} is too narrow`).toBeGreaterThan(1.4);
       }
     }
+  });
+
+  it("keeps both room partitions free of temporary door models", () => {
+    expect(PLACEMENTS.some((placement) => placement.model === "doorway")).toBe(false);
+  });
+
+  it("faces the washing-machine door into the utility room", () => {
+    const washer = PLACEMENTS.find((placement) => placement.id === "washer");
+    expect(washer?.model).toBe("washing-machine");
+    expect(washer?.rotationY).toBeCloseTo(Math.PI);
   });
 
   it("keeps the homeowner's routine inside the house", () => {

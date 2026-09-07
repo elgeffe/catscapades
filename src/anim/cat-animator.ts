@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import type { CatRig } from "../models/cat";
-import { solveLeg } from "./leg-ik";
+import { solveLegLocal } from "./leg-ik";
 import { clamp, damp, lerp, lerpPhase, shortestAngle, smoothstep, wobble } from "../core/math";
 
 /**
@@ -140,9 +140,11 @@ export class CatAnimator {
   private cycle = 0;
   private cycleFrequency = 0;
 
-  private bodyLift = 0;
+  private bodyLift: number;
   private bodyPitch = 0;
   private bodyRoll = 0;
+  private pelvisRoll = 0;
+  private chestRoll = 0;
   private spineYaw = 0;
   private spineFlex = 0;
   private headYaw = 0;
@@ -163,8 +165,13 @@ export class CatAnimator {
   private readonly tailPoints: THREE.Vector3[] = [];
   private readonly tailPrevious: THREE.Vector3[] = [];
   private tailInitialised = false;
+  private tailAccumulator = 0;
 
   private readonly scratchWorld = new THREE.Vector3();
+  private readonly scratchRootWorld = new THREE.Vector3();
+  private readonly scratchTarget = new THREE.Vector3();
+  private readonly scratchDesired = new THREE.Vector3();
+  private readonly scratchMidpoint = new THREE.Vector3();
   private readonly scratchQuaternion = new THREE.Quaternion();
   private readonly scratchParentQuaternion = new THREE.Quaternion();
   private readonly scratchMatrix = new THREE.Matrix4();
@@ -173,6 +180,9 @@ export class CatAnimator {
   private readonly lookLocal = new THREE.Vector3();
 
   constructor(private readonly rig: CatRig) {
+    // Start from the authored bind pose. Initialising at zero caused the first
+    // animation frame to collapse the torso onto the floor before recovering.
+    this.bodyLift = rig.standHeight;
     this.legPhaseOffsets = rig.legs.map((leg) => leg.phaseOffset);
   }
 
@@ -209,6 +219,7 @@ export class CatAnimator {
   /** Re-seeds the tail simulation after a teleport so it does not whip. */
   resetSecondaryMotion(): void {
     this.tailInitialised = false;
+    this.tailAccumulator = 0;
   }
 
   // -- gait ------------------------------------------------------------------
@@ -274,13 +285,16 @@ export class CatAnimator {
       ? -Math.max(0, Math.sin(this.cycle * Math.PI * 2 - 0.9)) * 0.03 * motion
       : 0;
 
-    const airborneLift = input.airborne * 0.045;
+    const airborneLift = input.airborne * 0.025;
     const landCrouch = -input.landImpact * 0.11;
     const idleBreath = Math.sin(this.breath) * 0.004 * (1 - motion);
 
     const rideScale = lerp(1, gait.crouch, this.crouchWeight * 0.85 + (gait.name === "creep" ? 0.15 : 0));
-    const sitLift = this.sitWeight * 0.055;
-    const sleepDrop = -this.sleepWeight * 0.235;
+    // A sit lowers the haunches while the pitched body and flexed spine keep
+    // the chest upright. A loaf settles the sternum almost onto the floor;
+    // its folded limbs are then hidden by the continuous chest/haunch skins.
+    const sitLift = -this.sitWeight * 0.09;
+    const sleepDrop = -this.sleepWeight * 0.17;
 
     const height = this.rig.standHeight * rideScale + bob + gallopDrop + airborneLift
       + landCrouch + idleBreath + sitLift + sleepDrop;
@@ -289,17 +303,17 @@ export class CatAnimator {
 
     // Lean into acceleration, dip on landing, and stretch out mid-flight.
     const accelPitch = clamp(-this.smoothedAccel * 0.012, -0.16, 0.16);
-    const flightPitch = input.airborne * lerp(-0.24, 0.2, clamp(input.jumpProgress, 0, 1));
+    const flightPitch = input.airborne * lerp(-0.18, 0.16, clamp(input.jumpProgress, 0, 1));
     const landPitch = input.landImpact * 0.22;
-    const sitPitch = this.sitWeight * -0.34;
-    const targetPitch = accelPitch + flightPitch + landPitch + sitPitch
+    const restPitch = -this.sitWeight * 0.24 + this.sleepWeight * 0.018;
+    const targetPitch = accelPitch + flightPitch + landPitch + restPitch
       + Math.sin(this.cycle * Math.PI * 2) * gait.flex * 0.35 * motion;
     this.bodyPitch = damp(this.bodyPitch, targetPitch, 14, dt);
     this.rig.body.rotation.x = this.bodyPitch;
 
     // Bank into turns: the whole body rolls before the spine curves.
     const targetRoll = clamp(-this.smoothedTurn * 0.075 * smoothstep(0.3, 2.6, this.smoothedSpeed), -0.24, 0.24)
-      + this.sleepWeight * 0.5;
+      + this.sleepWeight * 0.02;
     this.bodyRoll = damp(this.bodyRoll, targetRoll, 9, dt);
     this.rig.body.rotation.z = this.bodyRoll;
 
@@ -311,28 +325,45 @@ export class CatAnimator {
     const gait = this.gait;
     const motion = smoothstep(0.02, 1.1, this.smoothedSpeed);
 
-    // Lateral curve: a turning cat bends like a comma, it does not pivot rigidly.
-    const targetYaw = clamp(this.smoothedTurn * 0.11, -0.3, 0.3) + this.sleepWeight * 0.55;
+    // Lateral curve: head/chest lead and the pelvis follows, producing the
+    // liquid comma silhouette that is characteristic of a turning cat.
+    const gaitYaw = Math.sin(this.cycle * Math.PI * 2) * 0.022 * motion
+      * (gait.name === "gallop" ? 0.25 : 1);
+    const targetYaw = clamp(this.smoothedTurn * 0.115, -0.32, 0.32)
+      + gaitYaw + this.sleepWeight * 0.12;
     this.spineYaw = damp(this.spineYaw, targetYaw, 8, dt);
     this.rig.spineLower.rotation.y = this.spineYaw * 0.45;
     this.rig.spineUpper.rotation.y = this.spineYaw * 0.55;
 
-    // Sagittal flexion: the gallop arch, plus a crouch hunch while stalking.
-    const arch = Math.sin(this.cycle * Math.PI * 2 + 0.6) * gait.flex * motion;
-    const flightArch = input.airborne * lerp(0.28, -0.18, clamp(input.jumpProgress, 0, 1));
-    const target = arch + flightArch + this.crouchWeight * 0.12 + this.sitWeight * 0.26 + this.sleepWeight * 0.42;
+    // Sagittal flexion alternates compression and extension. Because the coat
+    // is skinned to these bones, this now changes the silhouette instead of
+    // merely rotating hidden joints inside a rigid barrel.
+    const arch = Math.cos(this.cycle * Math.PI * 2 + 0.35) * gait.flex * motion;
+    const jump = clamp(input.jumpProgress, 0, 1);
+    const flightArch = input.airborne * (
+      lerp(0.16, -0.16, smoothstep(0.08, 0.58, jump))
+      + smoothstep(0.72, 1, jump) * 0.15
+    );
+    const target = arch + flightArch + this.crouchWeight * 0.1
+      - this.sitWeight * 0.34 + this.sleepWeight * 0.08;
     this.spineFlex = damp(this.spineFlex, target, 15, dt);
     this.rig.spineLower.rotation.x = this.spineFlex * 0.55;
     this.rig.spineUpper.rotation.x = this.spineFlex * 0.45;
-    this.rig.pelvis.rotation.x = -this.spineFlex * 0.3 + this.sitWeight * 0.5;
+    this.rig.pelvis.rotation.x = -this.spineFlex * 0.16 - this.sitWeight * 0.18;
 
-    // Shoulder roll from the swipe, plus a breathing ribcage at rest.
+    const gaitRoll = Math.sin(this.cycle * Math.PI * 2) * (gait.name === "walk" ? 0.055 : 0.035) * motion;
+    const targetPelvisRoll = gaitRoll - this.smoothedTurn * 0.018;
+    this.pelvisRoll = damp(this.pelvisRoll, targetPelvisRoll, 12, dt);
+    this.chestRoll = damp(this.chestRoll, -targetPelvisRoll * 0.72, 12, dt);
+    this.rig.pelvis.rotation.z = this.pelvisRoll;
+
+    // Shoulder counter-roll plus the action-specific swipe twist.
     const swipeTwist = Math.sin(input.swipe * Math.PI) * 0.42;
-    this.rig.chest.rotation.z = damp(this.rig.chest.rotation.z, swipeTwist, 16, dt);
+    this.rig.chest.rotation.z = damp(this.rig.chest.rotation.z, this.chestRoll + swipeTwist, 16, dt);
     this.rig.chest.rotation.y = damp(this.rig.chest.rotation.y, -swipeTwist * 0.5, 16, dt);
 
-    const breathScale = 1 + Math.sin(this.breath) * 0.022 * (1 - motion * 0.7);
-    this.rig.ribcage.scale.set(0.98 * breathScale, 1.0 * breathScale, 1.26);
+    const breathScale = 1 + Math.sin(this.breath) * 0.012 * (1 - motion * 0.75);
+    this.rig.ribcage.scale.set(1 + (breathScale - 1) * 0.55, breathScale, 1);
   }
 
   // -- legs ------------------------------------------------------------------
@@ -343,6 +374,12 @@ export class CatAnimator {
     const sweep = gait.stride * gait.duty * motion;
     const lift = gait.lift * motion;
     const rideHeight = this.rig.body.position.y;
+    const restWeight = Math.max(this.sitWeight, this.sleepWeight);
+
+    // Parent bones were just flexed by `updateSpine`; refresh them before
+    // converting body-space paw contacts into each articulated leg root.
+    this.rig.body.updateWorldMatrix(true, true);
+    if (restWeight > 0.001) this.rig.root.getWorldPosition(this.scratchRootWorld);
 
     this.rig.legs.forEach((leg, index) => {
       const phase = (this.cycle + (this.legPhaseOffsets[index] ?? 0)) % 1;
@@ -352,6 +389,7 @@ export class CatAnimator {
       let z = leg.restTarget.z;
       let y = -rideHeight;
       let x = leg.restTarget.x;
+      let curl = stance ? 0 : Math.sin(t * Math.PI) * 0.36;
 
       if (stance) {
         z += sweep * (0.5 - t);
@@ -370,31 +408,42 @@ export class CatAnimator {
       if (input.airborne > 0.01) {
         const tuck = input.airborne;
         const progress = clamp(input.jumpProgress, 0, 1);
+        const landing = smoothstep(0.62, 1, progress);
         if (leg.isFront) {
-          z = lerp(z, leg.restTarget.z + lerp(0.02, 0.2, progress), tuck);
-          y = lerp(y, -rideHeight + lerp(0.2, 0.09, progress), tuck);
+          const reach = lerp(leg.restTarget.z - 0.025, leg.restTarget.z + 0.21, smoothstep(0.12, 0.72, progress));
+          z = lerp(z, reach, tuck);
+          y = lerp(y, -rideHeight + lerp(0.145, 0.014, landing), tuck);
         } else {
-          z = lerp(z, leg.restTarget.z - lerp(0.16, 0.06, progress), tuck);
-          y = lerp(y, -rideHeight + lerp(0.16, 0.13, progress), tuck);
+          const gather = Math.sin(smoothstep(0.08, 0.76, progress) * Math.PI);
+          z = lerp(z, leg.restTarget.z - 0.11 + gather * 0.16, tuck);
+          y = lerp(y, -rideHeight + lerp(0.07 + gather * 0.11, 0.055, landing), tuck);
         }
+        curl = lerp(curl, (1 - landing) * 0.28, tuck);
       }
 
       if (this.sitWeight > 0.01) {
         const seated = this.sitWeight;
         if (leg.isFront) {
-          z = lerp(z, leg.restTarget.z + 0.03, seated);
+          z = lerp(z, 0.255, seated);
+          x = lerp(x, leg.side * 0.074, seated);
           y = lerp(y, -rideHeight, seated);
         } else {
-          z = lerp(z, leg.restTarget.z + 0.09, seated);
-          y = lerp(y, -rideHeight + 0.02, seated);
+          z = lerp(z, -0.085, seated);
+          x = lerp(x, leg.side * 0.105, seated);
+          y = lerp(y, -rideHeight + 0.002, seated);
         }
+        curl = lerp(curl, leg.isFront ? 0 : 0.11, seated);
       }
 
       if (this.sleepWeight > 0.01) {
         const asleep = this.sleepWeight;
-        z = lerp(z, leg.restTarget.z * 0.45 + (leg.isFront ? 0.1 : -0.02), asleep);
-        x = lerp(x, leg.restTarget.x * 0.35 + 0.06, asleep);
-        y = lerp(y, -rideHeight + 0.02, asleep);
+        // In a loaf the forepaws fold just behind the wrist line and the hind
+        // feet disappear beneath the flank. Targets stay far enough from the
+        // roots that the upper segments never solve upwards through the coat.
+        z = lerp(z, leg.isFront ? 0.265 : -0.205, asleep);
+        x = lerp(x, leg.side * (leg.isFront ? 0.02 : 0.028), asleep);
+        y = lerp(y, -rideHeight + 0.004, asleep);
+        curl = lerp(curl, leg.isFront ? 0.14 : 0.18, asleep);
       }
 
       // A paw strike lifts the near-front leg out of the gait entirely.
@@ -403,11 +452,42 @@ export class CatAnimator {
         z = lerp(z, leg.restTarget.z + 0.24, strike);
         y = lerp(y, -rideHeight + 0.24, strike);
         x = lerp(x, leg.restTarget.x + 0.05, strike);
+        curl = lerp(curl, 0.34, strike);
       }
 
-      const curl = stance ? 0 : Math.sin(t * Math.PI) * 0.5;
-      solveLeg(leg, x, y, z, curl);
       leg.root.rotation.z = -leg.side * this.smoothedTurn * 0.012;
+      leg.root.updateWorldMatrix(true, false);
+      this.scratchTarget.set(x, y, z);
+      this.rig.body.localToWorld(this.scratchTarget);
+      // Resting poses pitch the torso around its centre. Pin their contacts to
+      // the actual support plane so that raising the seated chest does not lift
+      // the forepaws (or drive the tucked hind paws below the floor).
+      if (restWeight > 0.001) {
+        this.scratchTarget.y = lerp(this.scratchTarget.y, this.scratchRootWorld.y + 0.004, restWeight);
+      }
+      leg.root.worldToLocal(this.scratchTarget);
+      solveLegLocal(leg, this.scratchTarget.x, this.scratchTarget.y, this.scratchTarget.z, curl);
+      // `solveLegLocal` plants the sole relative to the leg root. Seated roots
+      // inherit the steep chest/pelvis pitch, so counter it at the terminal
+      // paw to keep the toes resting on their pads rather than pointing up.
+      const rootPitch = leg.isFront
+        ? this.bodyPitch + this.spineFlex
+        : this.bodyPitch + this.rig.pelvis.rotation.x;
+      leg.paw.rotation.x -= rootPitch * restWeight;
+      leg.paw.rotation.z = -leg.upper.rotation.z * restWeight;
+
+      if (leg.isFront) {
+        const scapula = leg.side < 0 ? this.rig.scapulaLeft : this.rig.scapulaRight;
+        const swing = stance ? 0 : Math.sin(t * Math.PI);
+        const strideTravel = stance ? 0.5 - t : t - 0.5;
+        scapula.position.set(
+          leg.side * 0.113,
+          0.108 + swing * 0.012 + this.crouchWeight * 0.008,
+          0.005 - strideTravel * 0.035,
+        );
+        scapula.rotation.x = -0.12 + strideTravel * 0.38;
+        scapula.rotation.z = leg.side * (-0.08 + swing * 0.035);
+      }
     });
   }
 
@@ -436,14 +516,15 @@ export class CatAnimator {
     targetYaw += this.smoothedTurn * 0.06;
 
     targetPitch += this.crouchWeight * 0.2 + this.carryWeight * 0.24 - input.meow * 0.45;
-    targetPitch += this.sleepWeight * 0.55;
-    targetYaw += this.sleepWeight * 0.7;
+    targetPitch += this.sleepWeight * 0.4;
+    targetYaw += this.sleepWeight * 0.28;
 
     const rate = input.lookAt ? 7 : 3.4;
     this.headYaw = damp(this.headYaw, targetYaw, rate, dt);
     this.headPitch = damp(this.headPitch, targetPitch, rate, dt);
-    this.rig.head.rotation.set(this.headPitch, this.headYaw, -this.bodyRoll * 0.5 + this.sleepWeight * 0.3);
+    this.rig.head.rotation.set(this.headPitch, this.headYaw, -this.bodyRoll * 0.5 + this.sleepWeight * 0.07);
     this.rig.neck.rotation.x = damp(this.rig.neck.rotation.x, this.headPitch * 0.35 + this.carryWeight * 0.18, 8, dt);
+    this.rig.neck.rotation.y = damp(this.rig.neck.rotation.y, this.sleepWeight * 0.08, 6, dt);
   }
 
   private updateFace(dt: number, input: CatAnimationInput): void {
@@ -455,8 +536,8 @@ export class CatAnimator {
       [this.rig.earRight, 1, 4.3],
     ] as const) {
       const twitch = wobble(this.time * 1.4, seed) * 0.06;
-      ear.rotation.x = damp(ear.rotation.x, -0.12 - forward + twitch, 10, dt);
-      ear.rotation.z = damp(ear.rotation.z, side * (-0.2 - flatten * side * side * 0.6) + twitch * side, 10, dt);
+      ear.rotation.x = damp(ear.rotation.x, -0.08 - forward + twitch, 10, dt);
+      ear.rotation.z = damp(ear.rotation.z, side * (-0.16 - flatten * 0.46) + twitch * side, 10, dt);
       ear.rotation.y = damp(ear.rotation.y, side * (this.earAlert * 0.1) + twitch * 0.5, 8, dt);
     }
 
@@ -476,10 +557,11 @@ export class CatAnimator {
     this.rig.eyelidLeft.scale.y = lidScale;
     this.rig.eyelidRight.scale.y = lidScale;
 
-    // Pupils widen when alert or stalking.
-    const dilation = 1 + this.earAlert * 0.16 + this.crouchWeight * 0.22;
-    this.rig.eyeLeft.scale.set(dilation, dilation, 0.66);
-    this.rig.eyeRight.scale.set(dilation, dilation, 0.66);
+    // The iris stays seated in its socket; only the vertical pupil widens.
+    // Scaling the lime eyeballs was the source of the old alert-state bulge.
+    const dilation = 1 + this.earAlert * 0.9 + this.crouchWeight * 0.65;
+    this.rig.pupilLeft.scale.x = 0.34 * dilation;
+    this.rig.pupilRight.scale.x = 0.34 * dilation;
   }
 
   /**
@@ -489,83 +571,183 @@ export class CatAnimator {
    */
   private updateTail(dt: number, input: CatAnimationInput): void {
     const joints = this.rig.tailJoints;
-    const segment = this.rig.tailSegmentLength;
     this.rig.tailBase.updateWorldMatrix(true, false);
     this.rig.tailBase.getWorldPosition(this.scratchWorld);
+    this.rig.tailBase.getWorldQuaternion(this.scratchParentQuaternion);
 
     if (!this.tailInitialised || this.tailPoints.length !== joints.length + 1) {
       this.tailPoints.length = 0;
       this.tailPrevious.length = 0;
-      this.rig.tailBase.getWorldQuaternion(this.scratchParentQuaternion);
-      this.scratchDirection.set(0, 0.25, -1).normalize().applyQuaternion(this.scratchParentQuaternion);
       for (let index = 0; index <= joints.length; index += 1) {
-        const point = this.scratchWorld.clone().addScaledVector(this.scratchDirection, segment * index);
+        const point = this.tailRestPoint(index, input, new THREE.Vector3());
         this.tailPoints.push(point);
         this.tailPrevious.push(point.clone());
       }
       this.tailInitialised = true;
+      this.tailAccumulator = 0;
     }
 
+    const root = this.tailPoints[0];
+    const rootPrevious = this.tailPrevious[0];
+    if (!root || !rootPrevious) return;
+
+    // Fixed substeps make the same tail behave consistently in a 30, 60, or
+    // 120 fps browser. Multiple relaxation passes remove the old right-angle
+    // elbows while preserving delayed weight and overshoot.
+    this.tailAccumulator = Math.min(1 / 12, this.tailAccumulator + Math.min(dt, 1 / 15));
+    const fixedStep = 1 / 120;
+    while (this.tailAccumulator >= fixedStep) {
+      this.simulateTailStep(fixedStep, input);
+      this.tailAccumulator -= fixedStep;
+    }
+    rootPrevious.copy(root);
+    root.copy(this.scratchWorld);
+
+    this.solveTailJoints(joints);
+  }
+
+  private simulateTailStep(step: number, input: CatAnimationInput): void {
     const root = this.tailPoints[0];
     const rootPrevious = this.tailPrevious[0];
     if (!root || !rootPrevious) return;
     rootPrevious.copy(root);
     root.copy(this.scratchWorld);
 
-    // Rest carriage: up-and-back at ease, high when alert, low when stalking.
-    this.rig.tailBase.getWorldQuaternion(this.scratchParentQuaternion);
-    const carriage = lerp(0.05, 1.35, this.earAlert) - this.crouchWeight * 1.05 - this.sleepWeight * 0.8
-      + input.airborne * 0.5;
-
-    const gravity = -1.15 * (1 - this.earAlert * 0.45);
-    const stiffness = 0.3 + this.earAlert * 0.2;
-    const drag = 0.88;
-    const step = clamp(dt, 0, 1 / 30);
-
+    const drag = Math.pow(0.82, step * 60);
+    const gravity = 2.25 * (1 - this.earAlert * 0.42);
     for (let index = 1; index < this.tailPoints.length; index += 1) {
       const point = this.tailPoints[index];
       const previous = this.tailPrevious[index];
-      const parent = this.tailPoints[index - 1];
-      if (!point || !previous || !parent) continue;
-
-      // The rest direction curves along the chain, so the tail settles into an
-      // S rather than a rigid pole. This is the single biggest tell that a
-      // procedural tail is a simulation and not a stick.
-      const along = index / this.tailPoints.length;
-      this.scratchDirection
-        .set(0, carriage + along * (0.9 + this.earAlert * 1.1) - along * along * 0.7, -1)
-        .normalize()
-        .applyQuaternion(this.scratchParentQuaternion);
-
+      if (!point || !previous) continue;
       const velocityX = (point.x - previous.x) * drag;
       const velocityY = (point.y - previous.y) * drag;
       const velocityZ = (point.z - previous.z) * drag;
       previous.copy(point);
-      point.x += velocityX;
-      point.y += velocityY + gravity * step * step * 60;
-      point.z += velocityZ;
+      point.set(
+        point.x + velocityX,
+        point.y + velocityY - gravity * step * step,
+        point.z + velocityZ,
+      );
 
-      // Pull towards the rest pose so the tail has muscle, not just cloth.
-      const restX = parent.x + this.scratchDirection.x * segment;
-      const restY = parent.y + this.scratchDirection.y * segment;
-      const restZ = parent.z + this.scratchDirection.z * segment;
-      const blend = stiffness * (1 - (index - 1) / this.tailPoints.length * 0.55);
-      point.x += (restX - point.x) * blend;
-      point.y += (restY - point.y) * blend;
-      point.z += (restZ - point.z) * blend;
-
-      // Distance constraint keeps segments rigid.
-      const dx = point.x - parent.x;
-      const dy = point.y - parent.y;
-      const dz = point.z - parent.z;
-      const length = Math.hypot(dx, dy, dz) || 1e-5;
-      const scale = segment / length;
-      point.x = parent.x + dx * scale;
-      point.y = parent.y + dy * scale;
-      point.z = parent.z + dz * scale;
+      const along = index / (this.tailPoints.length - 1);
+      const poseMuscle = Math.max(this.sleepWeight, this.sitWeight) * 0.15;
+      const muscle = 0.045 + this.earAlert * 0.028 + (1 - along) * 0.025 + poseMuscle;
+      point.lerp(this.tailRestPoint(index, input, this.scratchDesired), muscle);
     }
 
-    // Back-solve joint rotations: each joint's local -Z must follow the chain.
+    this.rig.root.getWorldPosition(this.scratchRootWorld);
+    const floorY = this.scratchRootWorld.y + 0.014;
+    for (let iteration = 0; iteration < 5; iteration += 1) {
+      root.copy(this.scratchWorld);
+      for (let index = 1; index < this.tailPoints.length; index += 1) {
+        const point = this.tailPoints[index];
+        const parent = this.tailPoints[index - 1];
+        if (!point || !parent) continue;
+        this.constrainTailPoint(point, parent, floorY);
+      }
+
+      // Curvature relaxation behaves like muscle/fascia and prevents a single
+      // bone from absorbing the whole bend as a sharp elbow.
+      for (let index = 1; index < this.tailPoints.length - 1; index += 1) {
+        const point = this.tailPoints[index];
+        const before = this.tailPoints[index - 1];
+        const after = this.tailPoints[index + 1];
+        if (!point || !before || !after) continue;
+        this.scratchMidpoint.addVectors(before, after).multiplyScalar(0.5);
+        point.lerp(this.scratchMidpoint, 0.1);
+      }
+    }
+
+    // The curvature pass above moves points off their exact segment radius.
+    // Finish with one forward distance projection so no frame can leave a
+    // stretched segment or a visible pinch in the skinned tail.
+    root.copy(this.scratchWorld);
+    for (let index = 1; index < this.tailPoints.length; index += 1) {
+      const point = this.tailPoints[index];
+      const parent = this.tailPoints[index - 1];
+      if (!point || !parent) continue;
+      this.constrainTailPoint(point, parent, floorY);
+    }
+  }
+
+  /**
+   * Projects one tail point to its exact bone length without invalidating that
+   * length when it touches the floor. The previous post-projection y clamp
+   * shortened grounded segments and let several joints bunch into one kink.
+   */
+  private constrainTailPoint(point: THREE.Vector3, parent: THREE.Vector3, floorY: number): void {
+    const segment = this.rig.tailSegmentLength;
+    this.scratchDirection.subVectors(point, parent);
+    const distance = this.scratchDirection.length() || 1e-5;
+    this.scratchDirection.multiplyScalar(segment / distance);
+
+    if (parent.y + this.scratchDirection.y >= floorY) {
+      point.copy(parent).add(this.scratchDirection);
+      return;
+    }
+
+    const vertical = clamp(floorY - parent.y, -segment, segment);
+    const horizontal = Math.sqrt(Math.max(0, segment * segment - vertical * vertical));
+    const horizontalLength = Math.hypot(this.scratchDirection.x, this.scratchDirection.z);
+    if (horizontalLength > 1e-5) {
+      const scale = horizontal / horizontalLength;
+      point.set(
+        parent.x + this.scratchDirection.x * scale,
+        parent.y + vertical,
+        parent.z + this.scratchDirection.z * scale,
+      );
+    } else {
+      point.set(parent.x + horizontal, parent.y + vertical, parent.z);
+    }
+  }
+
+  /** Desired muscular carriage in tail-base local space, transformed to world. */
+  private tailRestPoint(index: number, input: CatAnimationInput, target: THREE.Vector3): THREE.Vector3 {
+    const count = Math.max(1, this.rig.tailJoints.length);
+    const t = clamp(index / count, 0, 1);
+    const length = this.rig.tailSegmentLength * count;
+    const alert = this.earAlert;
+    const low = this.crouchWeight;
+    const pose = Math.max(this.sleepWeight, this.sitWeight);
+    const tipLife = wobble(this.time * 0.85, 6.2) * (0.018 + alert * 0.025) * t * t;
+
+    const neutral = new THREE.Vector3(
+      -this.smoothedTurn * 0.012 * length * t * t + tipLife,
+      length * (-0.9 * t + 0.2 * t * t + 0.25 * t * t * t)
+        - low * length * 0.08 * t,
+      -length * (0.965 * t - 0.055 * t * t),
+    );
+    const upright = new THREE.Vector3(
+      length * 0.18 * Math.sin(t * Math.PI * 0.72) + tipLife * 0.6,
+      length * (1.04 * t - 0.42 * t * t * t),
+      -length * (0.46 * t + 0.08 * t * t),
+    );
+    neutral.lerp(upright, alert);
+    neutral.y += input.airborne * length * Math.sin(t * Math.PI) * 0.18;
+
+    if (pose > 0.001) {
+      // Resting tails settle behind the haunch with a small lateral bow. This
+      // arc is parameterised by length and never doubles back across the paws,
+      // so the tapered skin keeps one clean silhouette from every camera.
+      const restBlend = this.sitWeight / Math.max(pose, 1e-5);
+      const arc = lerp(0.35, 0.5, restBlend);
+      const angle = arc * t;
+      const radius = length / arc;
+      const along = Math.sin(angle);
+      const across = 1 - Math.cos(angle);
+      const wrapped = this.scratchTarget.set(
+        radius * across,
+        -radius * along * 0.46,
+        -radius * along * 0.888,
+      );
+      neutral.lerp(wrapped, pose);
+    }
+
+    return target.copy(neutral).applyQuaternion(this.scratchParentQuaternion).add(this.scratchWorld);
+  }
+
+  /** Back-solves local bone rotations from the relaxed world-space curve. */
+  private solveTailJoints(joints: readonly THREE.Object3D[]): void {
     this.rig.tailBase.getWorldQuaternion(this.scratchParentQuaternion);
     for (let index = 0; index < joints.length; index += 1) {
       const joint = joints[index];

@@ -13,6 +13,14 @@ import {
 } from "./level-data";
 import type { PhysicsWorld } from "../physics/physics-world";
 
+/** Stable directional-shadow settings for the full 30-unit diorama. */
+export const SUN_SHADOW_TUNING = {
+  near: 8,
+  far: 45,
+  bias: -0.001,
+  normalBias: 0.08,
+} as const;
+
 /**
  * Turns authored level data into a scene graph plus Rapier colliders.
  *
@@ -23,7 +31,7 @@ import type { PhysicsWorld } from "../physics/physics-world";
  */
 
 export interface LevelHandles {
-  /** Named sub-objects the game animates: doors, taps, water, spill states. */
+  /** Named sub-objects the game animates: taps, water, and spill states. */
   readonly parts: ReadonlyMap<string, THREE.Object3D>;
   readonly flourBag: BuiltModel;
   readonly puddle: THREE.Object3D;
@@ -31,7 +39,6 @@ export interface LevelHandles {
   readonly sinkPool: THREE.Object3D;
   readonly sinkOverflow: THREE.Object3D;
   readonly cupboardDoor: THREE.Object3D;
-  readonly backDoor: THREE.Object3D;
 }
 
 export function buildLevel(scene: THREE.Scene, physics: PhysicsWorld): LevelHandles {
@@ -73,7 +80,6 @@ export function buildLevel(scene: THREE.Scene, physics: PhysicsWorld): LevelHand
     sinkPool: requirePart(parts, "sink:pool"),
     sinkOverflow: requirePart(parts, "sink:overflow"),
     cupboardDoor: requirePart(parts, "cupboard:door"),
-    backDoor: requirePart(parts, "back-door:door"),
   };
   return handles;
 }
@@ -126,10 +132,14 @@ function buildLighting(scene: THREE.Scene): void {
   sun.shadow.camera.right = 22;
   sun.shadow.camera.top = 15;
   sun.shadow.camera.bottom = -15;
-  sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 55;
-  sun.shadow.bias = -0.0009;
-  sun.shadow.normalBias = 0.02;
+  // Tight depth bounds preserve substantially more precision than the old
+  // 1–55 range. The larger normal offset and small negative depth bias prevent
+  // static meshes from self-shadowing in stripes ("shadow acne"), which was
+  // especially visible on horizontal surfaces on Apple/WebGL GPUs.
+  sun.shadow.camera.near = SUN_SHADOW_TUNING.near;
+  sun.shadow.camera.far = SUN_SHADOW_TUNING.far;
+  sun.shadow.bias = SUN_SHADOW_TUNING.bias;
+  sun.shadow.normalBias = SUN_SHADOW_TUNING.normalBias;
   scene.add(sun);
   scene.add(sun.target);
   sun.target.position.set(3, 0, -0.5);

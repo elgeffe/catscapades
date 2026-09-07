@@ -3,8 +3,11 @@ import type { InputFrame } from "./input";
 import { TinyAudio } from "./audio";
 import type { GameSettings } from "./settings";
 import { resolveInteraction, type InteractionCandidate } from "./core/gameplay";
-import { OBJECTIVE_DEFINITIONS, OPTIONAL_OBJECTIVE_DEFINITIONS } from "./core/level-model";
+import {
+  isCatastropheReady, OBJECTIVE_DEFINITIONS, OPTIONAL_OBJECTIVE_DEFINITIONS,
+} from "./core/level-model";
 import { clamp, damp, dampAngle, smoothstep } from "./core/math";
+import { AStarPathfinder, type NavigationPoint } from "./core/pathfinding";
 import { buildCat, type CatRig } from "./models/cat";
 import { buildOwner, type OwnerRig } from "./models/owner";
 import { buildMugShards, buildBook, buildFruitBowl, buildKettle, buildKey, buildMouseToy, buildMug, buildSausage, buildSock, buildSponge, type BuiltProp } from "./models/props";
@@ -13,7 +16,7 @@ import { OwnerAnimator } from "./anim/owner-animator";
 import { PhysicsWorld, type CharacterBody, type DynamicBody } from "./physics/physics-world";
 import { buildLevel, type LevelHandles } from "./level/level-builder";
 import {
-  OWNER_ROUTINE, POINTS_OF_INTEREST, PROPS, SPAWN, STATIONS,
+  OWNER_ROUTINE, POINTS_OF_INTEREST, PROPS, SINK_BASIN, SPAWN, STATIONS, WORLD,
   type PropSpec, type StationSpec,
 } from "./level/level-data";
 import { CameraDirector } from "./camera/camera-director";
@@ -48,10 +51,16 @@ const MAX_FRAME_DELTA = FIXED_STEP * 8;
 const CATCH_DISTANCE = 1.15;
 const SWIPE_REACH = 0.95;
 const CARRY_REACH = 0.75;
+const OWNER_RADIUS = 0.34;
+const OWNER_NAV_CELL = 0.4;
+const OWNER_NAV_CLEARANCE = OWNER_RADIUS + 0.06;
 
 export class CatscapadesGame {
   readonly scene = new THREE.Scene();
-  readonly camera = new THREE.PerspectiveCamera(34, 1, 0.05, 120);
+  // Keep the depth range proportional to the compact diorama. The former
+  // 0.05–120 span discarded precision and amplified near-coplanar flicker on
+  // Apple/WebGL depth buffers; fog already hides everything beyond 62 units.
+  readonly camera = new THREE.PerspectiveCamera(34, 1, 0.18, 80);
 
   private readonly audio = new TinyAudio();
   private readonly cat: CatRig;
@@ -60,6 +69,12 @@ export class CatscapadesGame {
   private readonly owner: OwnerRig;
   private readonly ownerAnimator: OwnerAnimator;
   private readonly ownerBody: CharacterBody;
+  private readonly ownerPathfinder = new AStarPathfinder({
+    minX: WORLD.minX + OWNER_NAV_CLEARANCE,
+    maxX: WORLD.maxX - OWNER_NAV_CLEARANCE,
+    minZ: WORLD.minZ + OWNER_NAV_CLEARANCE,
+    maxZ: WORLD.maxZ - OWNER_NAV_CLEARANCE,
+  }, OWNER_NAV_CELL, OWNER_NAV_CLEARANCE);
   private readonly director: CameraDirector;
   private readonly level: LevelHandles;
 
@@ -76,6 +91,9 @@ export class CatscapadesGame {
   private readonly ownerTarget = new THREE.Vector3();
   private readonly ownerDesired = new THREE.Vector3();
   private readonly ownerLookAt = new THREE.Vector3();
+  private readonly ownerPathGoal = new THREE.Vector3(
+    Number.POSITIVE_INFINITY, 0, Number.POSITIVE_INFINITY,
+  );
   private readonly scratchVector = new THREE.Vector3();
   private readonly scratchVectorB = new THREE.Vector3();
   private readonly lookTarget = new THREE.Vector3();
@@ -90,6 +108,13 @@ export class CatscapadesGame {
   private ownerSurprise = 0;
   private ownerReach = 0;
   private ownerCarrying = false;
+  private ownerPath: readonly NavigationPoint[] = [];
+  private ownerWaypoint = 0;
+  private ownerPathAge = Number.POSITIVE_INFINITY;
+  private ownerPathValid = false;
+  private ownerPathComplete = false;
+  private ownerPathReachedGoal = false;
+  private ownerStuckTime = 0;
   private suspicion = 0;
 
   private carrying: LiveProp | null = null;
@@ -97,10 +122,9 @@ export class CatscapadesGame {
   private sinkTimer = 0;
   private cupboardOpen = false;
   private flourSpilled = false;
+  private mugBroken = false;
   private catastrophe = false;
   private caughtCount = 0;
-  private backDoorOpen = false;
-  private backDoorAngle = 0;
 
   private swipeTimer = 0;
   private meowTimer = 0;
@@ -124,7 +148,8 @@ export class CatscapadesGame {
   private currentPrompt = "";
   private stalkRequested = false;
   private settings: GameSettings = {
-    masterVolume: 0.8, effectsVolume: 0.8, graphics: "high", reducedMotion: false, highContrast: false,
+    masterVolume: 0.8, effectsVolume: 0.8, musicVolume: 0.35,
+    graphics: "high", reducedMotion: false, highContrast: false,
   };
 
   private constructor(
@@ -149,7 +174,9 @@ export class CatscapadesGame {
     this.scene.add(this.owner.root);
     this.ownerAnimator = new OwnerAnimator(this.owner);
     this.ownerPosition.copy(SPAWN.owner);
-    this.ownerBody = physics.createCharacter(SPAWN.owner.clone(), 0.34, 0.62, { autostep: 0.3, snap: 0.35 });
+    this.ownerBody = physics.createCharacter(
+      SPAWN.owner.clone(), OWNER_RADIUS, 0.62, { autostep: 0.3, snap: 0.35 },
+    );
 
     this.buildProps();
 
@@ -175,7 +202,7 @@ export class CatscapadesGame {
   }
 
   start(): void {
-    this.audio.unlock();
+    this.audio.startMusic();
     this.started = true;
     this.lastFrameTime = performance.now() / 1000;
   }
@@ -186,6 +213,7 @@ export class CatscapadesGame {
 
   setPaused(value: boolean): void {
     this.paused = value;
+    this.audio.setPaused(value);
     this.lastFrameTime = performance.now() / 1000;
     this.accumulator = 0;
   }
@@ -198,7 +226,7 @@ export class CatscapadesGame {
 
   applySettings(settings: GameSettings): void {
     this.settings = settings;
-    this.audio.setVolume(settings.masterVolume, settings.effectsVolume);
+    this.audio.setVolume(settings.masterVolume, settings.effectsVolume, settings.musicVolume);
     this.renderer.shadowMap.enabled = settings.graphics === "high";
     this.renderer.shadowMap.needsUpdate = true;
     document.body.classList.toggle("high-contrast", settings.highContrast);
@@ -217,7 +245,7 @@ export class CatscapadesGame {
   debugTeleport(x: number, z: number, y = 1.2): void {
     this.controller.teleport(this.scratchVector.set(x, y, z));
     this.catAnimator.resetSecondaryMotion();
-    this.director.updateZone(x);
+    this.director.updateZone(x, z);
   }
 
   /**
@@ -258,7 +286,13 @@ export class CatscapadesGame {
       cameraZone: this.director.currentZoneId(),
       carrying: this.carrying?.spec.id ?? null,
       preparations: [...this.preparations],
+      mugBroken: this.mugBroken,
       ownerState: this.ownerState,
+      ownerRoute: {
+        algorithm: "A*",
+        remainingWaypoints: Math.max(0, this.ownerPath.length - this.ownerWaypoint),
+        reachesRequestedGoal: this.ownerPathReachedGoal,
+      },
       suspicion: Math.round(this.suspicion),
       objectives: this.objectives.filter((objective) => objective.complete).map((objective) => objective.id),
       frameRate: Math.round(this.smoothedFrameRate),
@@ -331,7 +365,7 @@ export class CatscapadesGame {
     if (controllable) this.handleActions(input);
     this.updateWorldState(dt);
     this.updateObjectives();
-    this.director.updateZone(this.catState.position.x);
+    this.director.updateZone(this.catState.position.x, this.catState.position.z);
     if (this.director.consumeZoneChange()) {
       this.zoneLabelTimer = 1.8;
       this.cameraLabelElement.textContent = this.director.currentLabel();
@@ -348,10 +382,6 @@ export class CatscapadesGame {
       } else {
         this.alertOwner(this.controller ? this.catPosition() : SPAWN.cat, "meow");
         this.completeObjective("distract", "The homeowner turns towards the noise.");
-        if (this.catPosition().x < -2.6) {
-          this.backDoorOpen = true;
-          this.showToast("The back door swings open. How convenient.");
-        }
       }
     }
 
@@ -378,6 +408,22 @@ export class CatscapadesGame {
       candidates.push({
         id: "drop", verb: "drop", distance: 0, facing: 1, priority: 3, relevant: true, enabled: true,
       });
+      const sinkDistance = Math.hypot(
+        position.x - SINK_BASIN.position[0],
+        position.z - SINK_BASIN.position[2],
+      );
+      if (this.carrying.spec.id === "sock" && this.sinkRunning
+        && position.y >= SINK_BASIN.minCatHeight
+        && sinkDistance <= SINK_BASIN.interactionRadius) {
+        this.scratchVector.set(
+          SINK_BASIN.position[0], SINK_BASIN.position[1], SINK_BASIN.position[2],
+        );
+        candidates.push({
+          id: "drop:sink", verb: "drop", distance: sinkDistance,
+          facing: facingScore(position, facing, this.scratchVector),
+          priority: 6, relevant: true, enabled: true,
+        });
+      }
     }
 
     for (const prop of this.props) {
@@ -433,7 +479,7 @@ export class CatscapadesGame {
     const [kind, key = ""] = id.split(":");
 
     if (kind === "drop") {
-      this.dropCarried();
+      this.dropCarried(key === "sink" ? "sink" : undefined);
       return;
     }
     if (kind === "carry") {
@@ -507,18 +553,24 @@ export class CatscapadesGame {
     this.emitStimulus(this.scratchVector, 1.1, "swipe");
   }
 
-  private dropCarried(): void {
+  private dropCarried(target?: "sink"): void {
     const prop = this.carrying;
     if (!prop) return;
     this.carrying = null;
     prop.body.setCarried(false);
-    this.cat.mouthAnchor.getWorldPosition(this.scratchVector);
-    this.scratchVector.y = Math.max(this.scratchVector.y, this.catPosition().y + prop.restOffset);
+    if (target === "sink") {
+      this.scratchVector.set(
+        SINK_BASIN.position[0], SINK_BASIN.position[1], SINK_BASIN.position[2],
+      );
+    } else {
+      this.cat.mouthAnchor.getWorldPosition(this.scratchVector);
+      this.scratchVector.y = Math.max(this.scratchVector.y, this.catPosition().y + prop.restOffset);
+    }
     prop.body.teleport(this.scratchVector);
 
-    if (prop.spec.id === "sock" && this.sinkRunning
-      && Math.hypot(this.scratchVector.x - 1.9, this.scratchVector.z + 7.1) < 1.9 && this.scratchVector.y > 1.0) {
+    if (prop.spec.id === "sock" && target === "sink") {
       this.completeObjective("sock-sink", "Sock soup. An ambitious new recipe.");
+      return;
     }
     if (prop.spec.id === "key" && this.scratchVector.distanceTo(this.scratchVectorB.set(-11.4, 0.3, 4.1)) < 1.9) {
       this.completeObjective("key-box", "The key has joined your outdoor collection.");
@@ -531,6 +583,7 @@ export class CatscapadesGame {
     this.completeObjective("innocent", "Fast asleep. Has been all morning, obviously.");
     this.completed = true;
     if (this.caughtCount === 0) this.completeObjective("uncaught", "Never once caught. Unbearably smug.");
+    this.audio.stopMusic();
     this.audio.success();
     window.setTimeout(() => this.successElement.classList.add("visible"), 600);
   }
@@ -570,8 +623,6 @@ export class CatscapadesGame {
     this.level.cupboardDoor.rotation.y = damp(
       this.level.cupboardDoor.rotation.y, this.cupboardOpen ? -1.32 : 0, 6, dt,
     );
-    this.backDoorAngle = damp(this.backDoorAngle, this.backDoorOpen ? -1.5 : 0, 4, dt);
-    this.level.backDoor.rotation.y = this.backDoorAngle;
 
     for (const prop of this.props) {
       prop.body.syncTo(prop.object);
@@ -598,14 +649,19 @@ export class CatscapadesGame {
     this.emitStimulus(this.scratchVector, 2.2, "crash");
     this.showToast("CRASH. That mug had been in the family for weeks.");
 
-    if (this.preparations.size >= 2 && !this.catastrophe) {
-      this.catastrophe = true;
-      this.completeObjective("catastrophe", "Flour. Water. Crockery. A perfectly ruined morning.");
-      this.audio.success();
-      this.suspicion = 100;
-    } else if (!this.catastrophe) {
+    if (prop.spec.id === "mug") this.mugBroken = true;
+    if (!this.tryCompleteCatastrophe() && !this.catastrophe) {
       this.showToast("Satisfying — but the kitchen is not nearly ruined enough yet.");
     }
+  }
+
+  private tryCompleteCatastrophe(): boolean {
+    if (this.catastrophe || !isCatastropheReady(this.mugBroken, this.preparations.size)) return false;
+    this.catastrophe = true;
+    this.completeObjective("catastrophe", "Flour. Water. Crockery. A perfectly ruined morning.");
+    this.audio.success();
+    this.suspicion = 100;
+    return true;
   }
 
   // -- homeowner -------------------------------------------------------------
@@ -689,23 +745,81 @@ export class CatscapadesGame {
   }
 
   private moveOwnerToward(target: THREE.Vector3, speed: number, dt: number): boolean {
-    this.ownerDesired.set(target.x - this.ownerPosition.x, 0, target.z - this.ownerPosition.z);
-    const distance = this.ownerDesired.length();
-    if (distance < 0.2) {
+    this.ownerPathAge += dt;
+    const goalMoved = Math.hypot(
+      target.x - this.ownerPathGoal.x,
+      target.z - this.ownerPathGoal.z,
+    ) > OWNER_NAV_CELL * 0.75;
+    const refreshInterval = this.ownerState === "pursuing" ? 0.28 : 1.1;
+    const retryMissingPath = !this.ownerPathValid && this.ownerPathAge >= 0.35;
+    const refreshActivePath = this.ownerPathValid
+      && !this.ownerPathComplete
+      && this.ownerPathAge >= refreshInterval;
+    if (goalMoved || retryMissingPath || refreshActivePath) {
+      this.planOwnerPath(target);
+    }
+
+    while (this.ownerWaypoint < this.ownerPath.length) {
+      const waypoint = this.ownerPath[this.ownerWaypoint];
+      if (!waypoint) break;
+      const distance = Math.hypot(
+        waypoint.x - this.ownerPosition.x,
+        waypoint.z - this.ownerPosition.z,
+      );
+      if (distance >= 0.2) break;
+      this.ownerWaypoint += 1;
+    }
+
+    if (!this.ownerPathValid || this.ownerWaypoint >= this.ownerPath.length) {
+      this.ownerPathComplete = this.ownerPathValid;
       this.ownerSpeed = damp(this.ownerSpeed, 0, 8, dt);
       this.ownerBody.move(this.scratchVector.set(0, -0.2 * dt, 0));
-      return true;
+      return this.ownerPathComplete;
     }
+
+    const waypoint = this.ownerPath[this.ownerWaypoint];
+    if (!waypoint) return false;
+    this.ownerDesired.set(
+      waypoint.x - this.ownerPosition.x,
+      0,
+      waypoint.z - this.ownerPosition.z,
+    );
+    const distance = this.ownerDesired.length();
     this.ownerDesired.normalize();
     const step = Math.min(distance, speed * dt);
     this.ownerSpeed = damp(this.ownerSpeed, speed, 6, dt);
-    this.ownerBody.move(this.scratchVector.set(
+    const movement = this.ownerBody.move(this.scratchVector.set(
       this.ownerDesired.x * step, -0.2 * dt, this.ownerDesired.z * step,
     ));
+    const planarMovement = Math.hypot(movement.translation.x, movement.translation.z);
+    if (step > 0.002 && planarMovement < step * 0.15) this.ownerStuckTime += dt;
+    else this.ownerStuckTime = Math.max(0, this.ownerStuckTime - dt * 2);
+    if (this.ownerStuckTime > 0.3) {
+      // The obstacle grid handles authored scenery. This retry covers a dynamic
+      // prop temporarily wedged under the kinematic controller.
+      this.ownerPathValid = false;
+      this.ownerPathAge = 0.35;
+      this.ownerStuckTime = 0;
+    }
     this.ownerFacing = dampAngle(
       this.ownerFacing, Math.atan2(this.ownerDesired.x, this.ownerDesired.z), 7, dt,
     );
     return false;
+  }
+
+  private planOwnerPath(target: THREE.Vector3): void {
+    const result = this.ownerPathfinder.findPath(
+      { x: this.ownerPosition.x, z: this.ownerPosition.z },
+      { x: target.x, z: target.z },
+      this.physics.navigationObstacles(0.08, 1.9),
+    );
+    this.ownerPathGoal.copy(target);
+    this.ownerPathAge = 0;
+    this.ownerWaypoint = 0;
+    this.ownerPathComplete = false;
+    this.ownerPathValid = result !== null;
+    this.ownerPathReachedGoal = result?.reachedGoal ?? false;
+    this.ownerPath = result?.waypoints ?? [];
   }
 
   /** A stimulus the homeowner may choose to walk over and inspect. */
@@ -850,11 +964,18 @@ export class CatscapadesGame {
     const choice = resolveInteraction(this.buildInteractionCandidates());
     if (choice) {
       const [kind, key = ""] = choice.id.split(":");
-      if (kind === "drop") return `${action} — drop ${this.carrying?.spec.label ?? "it"}`;
+      if (kind === "drop") {
+        return key === "sink"
+          ? `${action} — drop ${this.carrying?.spec.label ?? "it"} into the sink`
+          : `${action} — drop ${this.carrying?.spec.label ?? "it"}`;
+      }
       if (kind === "carry") {
         return `${action} — pick up ${this.props.find((prop) => prop.spec.id === key)?.spec.label ?? "it"}`;
       }
       if (kind === "swipe") {
+        if (key === "mug" && this.preparations.size >= 2) {
+          return `${action} — knock the red mug off the breakfast table`;
+        }
         return `${action} — swipe ${this.props.find((prop) => prop.spec.id === key)?.spec.label ?? "it"}`;
       }
       if (kind === "station") {
@@ -930,7 +1051,20 @@ export class CatscapadesGame {
       }
     }
     if (this.preparations.size >= 2) {
-      this.completeObjective("prepare", "The trap is set. Now find something breakable.");
+      this.completeObjective(
+        "prepare",
+        "The trap is set. Climb onto the breakfast table and knock the red mug to the floor.",
+      );
+      this.tryCompleteCatastrophe();
+    }
+
+    const catastrophe = this.objectives.find((objective) => objective.id === "catastrophe");
+    if (catastrophe && !catastrophe.complete && this.preparations.size >= 2 && !this.mugBroken) {
+      const text = "Trigger the breakfast catastrophe: knock the red mug off the breakfast table";
+      if (catastrophe.text !== text) {
+        catastrophe.text = text;
+        this.renderObjectives();
+      }
     }
 
     // Optional: sit in the fruit bowl.

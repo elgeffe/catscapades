@@ -66,8 +66,20 @@ export const SURFACE_HEIGHTS = {
   washer: 1.28,
   shelf: 2.02,
   planter: 0.82,
-  box: 0.62,
+  box: 0.14,
   stool: 0.92,
+} as const;
+
+/** Local-space dimensions shared by the sink model and its authored level target. */
+export const SINK_BASIN_GEOMETRY = {
+  centerX: -0.32,
+  centerZ: 0,
+  openingWidth: 0.96,
+  openingDepth: 0.8,
+  innerWidth: 0.84,
+  innerDepth: 0.68,
+  bottom: 1.08,
+  rim: COUNTER_HEIGHT,
 } as const;
 
 /** Base cabinet run with a worktop, doors, handles, and a toe kick. */
@@ -107,30 +119,147 @@ export function buildKitchenCounter(length: number, depth = 1.32): BuiltModel {
 export function buildSinkUnit(): BuiltModel {
   const group = new THREE.Group();
   group.name = "sink-unit";
-  const base = buildKitchenCounter(2.1, 1.32);
-  group.add(base.object);
-
+  const width = 2.1;
+  const depth = 1.32;
+  const cabinet = surface(PALETTE.cabinet, { roughness: 0.78 });
+  const trim = surface(PALETTE.cabinetTrim, { roughness: 0.7 });
+  const top = surface(PALETTE.counter, { roughness: 0.42, metalness: 0.04 });
   const steel = surface(PALETTE.steel, { roughness: 0.24, metalness: 0.72 });
-  const basinDepth = 0.22;
-  const rim = COUNTER_HEIGHT - 0.045;
+  const darkSteel = surface(0x657176, { roughness: 0.3, metalness: 0.78 });
+  const basin = SINK_BASIN_GEOMETRY;
+  const worktopHeight = 0.09;
+  const worktopCenterY = COUNTER_HEIGHT - worktopHeight / 2;
+  const openingMinX = basin.centerX - basin.openingWidth / 2;
+  const openingMaxX = basin.centerX + basin.openingWidth / 2;
+  const openingMinZ = basin.centerZ - basin.openingDepth / 2;
+  const openingMaxZ = basin.centerZ + basin.openingDepth / 2;
 
-  // Basin walls, built as four thin plates so the recess reads from above.
-  group.add(box(0.9, 0.02, 0.72, steel, [-0.32, rim - basinDepth, 0]));
-  for (const [w, d, x, z] of [
-    [0.9, 0.03, -0.32, -0.36], [0.9, 0.03, -0.32, 0.36],
-    [0.03, 0.72, -0.77, 0], [0.03, 0.72, 0.13, 0],
-  ] as const) {
-    group.add(box(w, basinDepth, d, steel, [x, rim - basinDepth / 2, z]));
+  const carcass = box(
+    width, basin.bottom, depth - 0.1, cabinet,
+    [0, basin.bottom / 2, 0],
+  );
+  carcass.name = "sink-carcass";
+  group.add(carcass);
+  const toeKick = box(width - 0.06, 0.13, depth - 0.34, trim, [0, 0.065, -0.04]);
+  toeKick.name = "sink-toe-kick";
+  group.add(toeKick);
+
+  // The cabinet front continues up around the bowl without filling its cavity.
+  const frontRail = box(width, COUNTER_HEIGHT - basin.bottom - worktopHeight, 0.12, cabinet, [
+    0,
+    basin.bottom + (COUNTER_HEIGHT - basin.bottom - worktopHeight) / 2,
+    depth / 2 - 0.11,
+  ]);
+  frontRail.name = "sink-front-rail";
+  group.add(frontRail);
+  const doorWidth = (width - 0.13) / 2;
+  for (let index = 0; index < 2; index += 1) {
+    const x = -width / 2 + 0.055 + doorWidth * (index + 0.5);
+    const door = box(
+      doorWidth - 0.05, basin.bottom - 0.24, 0.04, trim,
+      [x, (basin.bottom - 0.24) / 2 + 0.19, depth / 2 - 0.06],
+    );
+    door.name = `sink-door-${index + 1}`;
+    group.add(door);
+    const handle = cylinder(
+      0.018, 0.018, doorWidth * 0.38, steel,
+      [x, basin.bottom - 0.08, depth / 2 - 0.02], 8,
+    );
+    handle.rotation.z = Math.PI / 2;
+    group.add(handle);
   }
+
+  // Four slabs leave a real opening in the worktop instead of hiding the bowl
+  // beneath one solid box. Their collision boxes use these exact dimensions.
+  const worktopSpecs = [
+    {
+      name: "sink-worktop-back",
+      width: width + 0.06,
+      depth: openingMinZ + depth / 2,
+      x: 0,
+      z: (-depth / 2 + openingMinZ) / 2,
+    },
+    {
+      name: "sink-worktop-front",
+      width: width + 0.06,
+      depth: depth / 2 - openingMaxZ,
+      x: 0,
+      z: (openingMaxZ + depth / 2) / 2,
+    },
+    {
+      name: "sink-worktop-left",
+      width: openingMinX + width / 2,
+      depth: basin.openingDepth,
+      x: (-width / 2 + openingMinX) / 2,
+      z: basin.centerZ,
+    },
+    {
+      name: "sink-worktop-right",
+      width: width / 2 - openingMaxX,
+      depth: basin.openingDepth,
+      x: (openingMaxX + width / 2) / 2,
+      z: basin.centerZ,
+    },
+  ] as const;
+  for (const spec of worktopSpecs) {
+    const slab = box(spec.width, worktopHeight, spec.depth, top, [
+      spec.x, worktopCenterY, spec.z,
+    ]);
+    slab.name = spec.name;
+    group.add(slab);
+  }
+
+  const basinDepth = basin.rim - basin.bottom;
+  const basinBottom = box(
+    basin.innerWidth, 0.025, basin.innerDepth, steel,
+    [basin.centerX, basin.bottom, basin.centerZ],
+  );
+  basinBottom.name = "sink-basin";
+  group.add(basinBottom);
+  const basinWallSpecs = [
+    ["sink-basin-back", basin.innerWidth, 0.035, basin.centerX, basin.centerZ - basin.innerDepth / 2],
+    ["sink-basin-front", basin.innerWidth, 0.035, basin.centerX, basin.centerZ + basin.innerDepth / 2],
+    ["sink-basin-left", 0.035, basin.innerDepth, basin.centerX - basin.innerWidth / 2, basin.centerZ],
+    ["sink-basin-right", 0.035, basin.innerDepth, basin.centerX + basin.innerWidth / 2, basin.centerZ],
+  ] as const;
+  for (const [name, w, d, x, z] of basinWallSpecs) {
+    const wall = box(w, basinDepth, d, steel, [
+      x, basin.bottom + basinDepth / 2, z,
+    ]);
+    wall.name = name;
+    group.add(wall);
+  }
+  const drain = cylinder(
+    0.075, 0.075, 0.012, darkSteel,
+    [basin.centerX, basin.bottom + 0.019, basin.centerZ], 18,
+  );
+  drain.name = "sink-drain";
+  group.add(drain);
+  for (let slot = -1; slot <= 1; slot += 1) {
+    const drainSlot = box(0.09, 0.014, 0.012, steel, [
+      basin.centerX, basin.bottom + 0.026, basin.centerZ + slot * 0.027,
+    ]);
+    drainSlot.name = `sink-drain-slot-${slot + 2}`;
+    group.add(drainSlot);
+  }
+
   for (let groove = 0; groove < 5; groove += 1) {
-    group.add(box(0.62, 0.012, 0.03, steel, [0.55, rim + 0.006, -0.28 + groove * 0.14]));
+    const drainingGroove = box(
+      0.62, 0.012, 0.025, steel,
+      [0.55, COUNTER_HEIGHT + 0.006, -0.28 + groove * 0.14],
+    );
+    drainingGroove.name = `draining-board-groove-${groove + 1}`;
+    group.add(drainingGroove);
   }
 
-  const tapBase = cylinder(0.07, 0.08, 0.06, steel, [-0.32, rim + 0.03, -0.42], 12);
+  const tapBase = cylinder(
+    0.07, 0.08, 0.06, steel,
+    [basin.centerX, COUNTER_HEIGHT + 0.03, openingMinZ - 0.02], 12,
+  );
   group.add(tapBase);
   const spout = new THREE.Group();
   spout.name = "tap";
-  spout.position.set(-0.32, rim + 0.06, -0.42);
+  spout.position.set(basin.centerX, COUNTER_HEIGHT + 0.06, openingMinZ - 0.02);
   group.add(spout);
   spout.add(cylinder(0.032, 0.032, 0.34, steel, [0, 0.17, 0], 10));
   const neck = cylinder(0.03, 0.03, 0.3, steel, [0, 0.33, 0.14], 10);
@@ -146,16 +275,16 @@ export function buildSinkUnit(): BuiltModel {
     surface(PALETTE.water, { roughness: 0.06, transparent: true, opacity: 0.62, side: THREE.DoubleSide }),
   );
   water.name = "sink-stream";
-  water.position.set(-0.32, rim + 0.16, -0.28);
+  water.position.set(basin.centerX, COUNTER_HEIGHT + 0.16, basin.centerZ - 0.28);
   water.visible = false;
   group.add(water);
 
   const pool = new THREE.Mesh(
-    new THREE.BoxGeometry(0.84, 0.02, 0.66),
+    new THREE.BoxGeometry(basin.innerWidth - 0.04, 0.02, basin.innerDepth - 0.04),
     surface(PALETTE.water, { roughness: 0.05, transparent: true, opacity: 0.75, emissive: 0x1d5a70, emissiveIntensity: 0.25 }),
   );
   pool.name = "sink-pool";
-  pool.position.set(-0.32, rim - basinDepth + 0.02, 0);
+  pool.position.set(basin.centerX, basin.bottom + 0.025, basin.centerZ);
   pool.visible = false;
   group.add(pool);
 
@@ -164,13 +293,45 @@ export function buildSinkUnit(): BuiltModel {
     surface(PALETTE.water, { roughness: 0.05, transparent: true, opacity: 0.5 }),
   );
   overflow.name = "sink-overflow";
-  overflow.position.set(-0.2, rim + 0.056, 0.2);
+  overflow.position.set(-0.2, COUNTER_HEIGHT + 0.056, 0.2);
   overflow.visible = false;
   group.add(overflow);
 
+  const colliders: BoxShape[] = [
+    {
+      center: [0, basin.bottom / 2, 0],
+      half: [width / 2, basin.bottom / 2, depth / 2 - 0.04],
+      label: "sink-carcass",
+    },
+    {
+      center: [0, frontRail.position.y, frontRail.position.z],
+      half: [width / 2, (COUNTER_HEIGHT - basin.bottom - worktopHeight) / 2, 0.06],
+      label: "sink-front-rail",
+    },
+    {
+      center: [basin.centerX, basin.bottom, basin.centerZ],
+      half: [basin.innerWidth / 2, 0.0125, basin.innerDepth / 2],
+      label: "sink-basin-bottom",
+    },
+  ];
+  for (const spec of worktopSpecs) {
+    colliders.push({
+      center: [spec.x, worktopCenterY, spec.z],
+      half: [spec.width / 2, worktopHeight / 2, spec.depth / 2],
+      label: spec.name,
+    });
+  }
+  for (const [name, w, d, x, z] of basinWallSpecs) {
+    colliders.push({
+      center: [x, basin.bottom + basinDepth / 2, z],
+      half: [w / 2, basinDepth / 2, d / 2],
+      label: name,
+    });
+  }
+
   return {
     object: group,
-    colliders: base.colliders,
+    colliders,
     parts: { tap: spout, lever, stream: water, pool, overflow },
   };
 }
@@ -380,41 +541,33 @@ export function buildWallShelf(width = 1.9): BuiltModel {
   };
 }
 
-/** Cardboard box with open flaps — the cat's home base and innocence spot. */
+/** Low cardboard sleeping pad — the cat's outdoor home base and innocence spot. */
 export function buildCardboardBox(): BuiltModel {
   const group = new THREE.Group();
   group.name = "cardboard-box";
-  const card = surface(PALETTE.cardboard, { roughness: 1 });
   const shade = surface(PALETTE.cardboardDark, { roughness: 1 });
   const width = 1.85;
   const depth = 1.45;
-  const height = SURFACE_HEIGHTS.box;
 
-  group.add(box(width, 0.08, depth, shade, [0, 0.04, 0]));
-  const blanket = box(width - 0.22, 0.07, depth - 0.22, surface(0xb2606f, { roughness: 1 }), [0, 0.1, 0]);
+  // Keep this as two vertically separated surfaces. The former four walls and
+  // folded flaps made the sleeping spot harder to enter and produced several
+  // near-overlapping cardboard edges when viewed from the garden camera.
+  const base = box(width, 0.07, depth, shade, [0, 0.035, 0]);
+  base.name = "sleeping-pad-base";
+  group.add(base);
+  const blanket = box(
+    width - 0.22,
+    0.065,
+    depth - 0.22,
+    surface(0xb2606f, { roughness: 1 }),
+    [0, 0.1075, 0],
+  );
+  blanket.name = "sleeping-pad-blanket";
   group.add(blanket);
-  for (const [x, z, w, d] of [
-    [-width / 2 + 0.04, 0, 0.07, depth], [width / 2 - 0.04, 0, 0.07, depth],
-    [0, -depth / 2 + 0.04, width, 0.07], [0, depth / 2 - 0.04, width, 0.07],
-  ] as const) {
-    group.add(box(w, height, d, card, [x, height / 2, z]));
-  }
-  // Two flaps folded outward, catching light differently from the walls.
-  for (const [z, tilt] of [[-depth / 2 + 0.04, -0.85], [depth / 2 - 0.04, 0.85]] as const) {
-    const flap = box(width, 0.05, depth * 0.52, shade, [0, height + depth * 0.11, z + Math.sign(z) * depth * 0.2]);
-    flap.rotation.x = tilt;
-    group.add(flap);
-  }
 
   return {
     object: group,
-    colliders: [
-      { center: [-width / 2 + 0.04, height / 2, 0], half: [0.045, height / 2, depth / 2] },
-      { center: [width / 2 - 0.04, height / 2, 0], half: [0.045, height / 2, depth / 2] },
-      { center: [0, height / 2, -depth / 2 + 0.04], half: [width / 2, height / 2, 0.045] },
-      { center: [0, height / 2, depth / 2 - 0.04], half: [width / 2, height / 2, 0.045] },
-      { center: [0, 0.07, 0], half: [width / 2, 0.07, depth / 2] },
-    ],
+    colliders: [{ center: [0, 0.035, 0], half: [width / 2, 0.035, depth / 2] }],
   };
 }
 
@@ -425,9 +578,36 @@ export function buildPottedPlant(scale = 1): BuiltModel {
   const soil = surface(PALETTE.soil, { roughness: 1 });
   const leaf = surface(PALETTE.leaf, { roughness: 0.92, flatShading: true });
 
-  group.add(cylinder(0.32 * scale, 0.24 * scale, 0.44 * scale, pot, [0, 0.22 * scale, 0], 14));
-  group.add(cylinder(0.35 * scale, 0.33 * scale, 0.08 * scale, pot, [0, 0.44 * scale, 0], 14));
-  group.add(cylinder(0.3 * scale, 0.3 * scale, 0.04 * scale, soil, [0, 0.46 * scale, 0], 12));
+  // An open-ended vessel plus a torus lip reads as a real pot from above. The
+  // previous solid rim cylinder and soil cylinder shared the exact same top
+  // plane, causing the striped z-fighting visible on Apple/WebGL GPUs.
+  const vessel = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.32 * scale, 0.24 * scale, 0.44 * scale, 16, 1, true),
+    pot,
+  );
+  vessel.name = "pot-vessel";
+  vessel.position.y = 0.22 * scale;
+  vessel.castShadow = true;
+  vessel.receiveShadow = true;
+  group.add(vessel);
+
+  const rim = new THREE.Mesh(
+    new THREE.TorusGeometry(0.31 * scale, 0.045 * scale, 8, 20),
+    pot,
+  );
+  rim.name = "pot-rim";
+  rim.position.y = 0.46 * scale;
+  rim.rotation.x = Math.PI / 2;
+  rim.castShadow = true;
+  rim.receiveShadow = true;
+  group.add(rim);
+
+  const soilSurface = cylinder(
+    0.285 * scale, 0.285 * scale, 0.022 * scale,
+    soil, [0, 0.455 * scale, 0], 16,
+  );
+  soilSurface.name = "pot-soil";
+  group.add(soilSurface);
   for (let blade = 0; blade < 7; blade += 1) {
     const angle = (blade / 7) * Math.PI * 2;
     const lean = 0.34 + (blade % 3) * 0.12;
@@ -450,13 +630,45 @@ export function buildPlanter(width = 2.6, depth = 1.1): BuiltModel {
   const group = new THREE.Group();
   group.name = "planter";
   const brick = surface(0xa9714f, { roughness: 0.95 });
+  const rim = surface(0xbd8360, { roughness: 0.9 });
   const soil = surface(PALETTE.soil, { roughness: 1 });
   const leaf = surface(0x5d7a4c, { roughness: 0.95, flatShading: true });
   const height = SURFACE_HEIGHTS.planter;
 
-  group.add(box(width, height, depth, brick, [0, height / 2, 0]));
-  group.add(box(width + 0.08, 0.09, depth + 0.08, surface(0xbd8360, { roughness: 0.9 }), [0, height - 0.045, 0]));
-  group.add(box(width - 0.24, 0.08, depth - 0.24, soil, [0, height - 0.05, 0]));
+  // Build an actual open planter instead of stacking capped boxes. The old
+  // full brick block, rim block, and soil block occupied the same top region,
+  // which produced z-fighting across the large outdoor planter.
+  const wallThickness = 0.12;
+  const wallHeight = height - 0.1;
+  const walls = [
+    box(width, wallHeight, wallThickness, brick, [0, wallHeight / 2, -depth / 2 + wallThickness / 2]),
+    box(width, wallHeight, wallThickness, brick, [0, wallHeight / 2, depth / 2 - wallThickness / 2]),
+    box(wallThickness, wallHeight, depth - wallThickness * 2, brick, [-width / 2 + wallThickness / 2, wallHeight / 2, 0]),
+    box(wallThickness, wallHeight, depth - wallThickness * 2, brick, [width / 2 - wallThickness / 2, wallHeight / 2, 0]),
+  ];
+  walls.forEach((wall, index) => {
+    wall.name = `planter-wall-${index}`;
+    group.add(wall);
+  });
+
+  const rimHeight = 0.1;
+  const rimRails = [
+    box(width + 0.08, rimHeight, wallThickness, rim, [0, height - rimHeight / 2, -depth / 2 + wallThickness / 2]),
+    box(width + 0.08, rimHeight, wallThickness, rim, [0, height - rimHeight / 2, depth / 2 - wallThickness / 2]),
+    box(wallThickness, rimHeight, depth - wallThickness * 2, rim, [-width / 2 + wallThickness / 2, height - rimHeight / 2, 0]),
+    box(wallThickness, rimHeight, depth - wallThickness * 2, rim, [width / 2 - wallThickness / 2, height - rimHeight / 2, 0]),
+  ];
+  rimRails.forEach((rail, index) => {
+    rail.name = `planter-rim-${index}`;
+    group.add(rail);
+  });
+
+  const soilBed = box(
+    width - 0.3, 0.06, depth - 0.3, soil,
+    [0, height - 0.03, 0],
+  );
+  soilBed.name = "planter-soil";
+  group.add(soilBed);
   for (let bush = 0; bush < 5; bush += 1) {
     const clump = new THREE.Mesh(new THREE.DodecahedronGeometry(0.22 + (bush % 3) * 0.06, 0), leaf);
     clump.position.set(-width / 2 + 0.4 + bush * ((width - 0.8) / 4), height + 0.12, (bush % 2) * 0.16 - 0.08);
@@ -493,29 +705,16 @@ export function buildFencePanel(width = 3.2, height = 2.3): BuiltModel {
   };
 }
 
-/** Wall opening with a frame and a door that can swing open. */
+/** Permanent framed wall opening. Door leaves are intentionally omitted. */
 export function buildDoorway(width = 2.4, height = 2.9): BuiltModel {
   const group = new THREE.Group();
   group.name = "doorway";
   const frame = surface(0x6f5947, { roughness: 0.82 });
-  const panel = surface(0xcbb794, { roughness: 0.78 });
-  const brass = surface(PALETTE.brass, { roughness: 0.34, metalness: 0.75 });
 
   for (const sz of [-1, 1] as const) {
     group.add(box(0.34, height, 0.22, frame, [0, height / 2, sz * (width / 2 + 0.11)]));
   }
   group.add(box(0.34, 0.26, width + 0.44, frame, [0, height - 0.13, 0]));
-
-  const hinge = new THREE.Group();
-  hinge.name = "door";
-  hinge.position.set(0, 0, -width / 2);
-  group.add(hinge);
-  const leaf = box(0.09, height - 0.3, width - 0.08, panel, [0, (height - 0.3) / 2, (width - 0.08) / 2]);
-  hinge.add(leaf);
-  for (const [y, z] of [[0.85, 0.55], [1.85, 0.55]] as const) {
-    hinge.add(box(0.06, 0.6, width * 0.32, surface(0xb9a483, { roughness: 0.8 }), [0.05, y, z * width * 0.5]));
-  }
-  hinge.add(cylinder(0.05, 0.05, 0.16, brass, [0.1, 1.32, width - 0.32], 10));
 
   return {
     object: group,
@@ -523,7 +722,6 @@ export function buildDoorway(width = 2.4, height = 2.9): BuiltModel {
       { center: [0, height / 2, width / 2 + 0.11], half: [0.17, height / 2, 0.11] },
       { center: [0, height / 2, -(width / 2 + 0.11)], half: [0.17, height / 2, 0.11] },
     ],
-    parts: { door: hinge },
   };
 }
 
@@ -553,22 +751,25 @@ export function buildWindow(width = 2.6, height = 1.9): BuiltModel {
 export function buildRug(width: number, depth: number, color = PALETTE.rug): BuiltModel {
   const group = new THREE.Group();
   group.name = "rug";
-  const base = new THREE.Mesh(new THREE.BoxGeometry(width, 0.024, depth), surface(color, { roughness: 1 }));
-  base.position.y = 0.012;
+  // Each visible layer starts just above the previous one. The old slabs
+  // overlapped almost completely and left their top faces only 0.003 units
+  // apart, which can z-fight on lower-precision mobile/Apple depth buffers.
+  const base = new THREE.Mesh(new THREE.BoxGeometry(width, 0.02, depth), surface(color, { roughness: 1 }));
+  base.position.y = 0.01;
   base.receiveShadow = true;
   group.add(base);
   const trim = new THREE.Mesh(
-    new THREE.BoxGeometry(width - 0.34, 0.026, depth - 0.34),
+    new THREE.BoxGeometry(width - 0.34, 0.008, depth - 0.34),
     surface(PALETTE.rugTrim, { roughness: 1 }),
   );
-  trim.position.y = 0.014;
+  trim.position.y = 0.0245;
   trim.receiveShadow = true;
   group.add(trim);
   const inner = new THREE.Mesh(
-    new THREE.BoxGeometry(width - 0.56, 0.028, depth - 0.56),
+    new THREE.BoxGeometry(width - 0.56, 0.008, depth - 0.56),
     surface(color, { roughness: 1 }),
   );
-  inner.position.y = 0.016;
+  inner.position.y = 0.033;
   inner.receiveShadow = true;
   group.add(inner);
   return { object: group, colliders: [] };
