@@ -234,13 +234,23 @@ describe("homeowner rig", () => {
     expect(report.bounds.size[1]).toBeGreaterThan(2.2);
   });
 
-  it("uses a rounded torso without a box-shaped chest plate", () => {
+  it("clothes the torso in one skinned surface rather than stacked primitives", () => {
     const rig = buildOwner();
+    // The shirt spans hem to collar as a single skinned loft. A separate chest
+    // shell plus a collar ring is what used to leave a seam at the neck and a
+    // hard edge at the waist.
+    const shirt = rig.torso.getObjectByName("shirt");
+    expect(shirt).toBeInstanceOf(THREE.SkinnedMesh);
+    expect((shirt as THREE.SkinnedMesh).skeleton.bones)
+      .toEqual([rig.hips, rig.torso, rig.neck]);
+    expect(rig.torso.getObjectByName("torso-shell")).toBeUndefined();
+    expect(rig.torso.getObjectByName("shirt-collar")).toBeUndefined();
+
     const torsoMeshes = rig.torso.children.filter(
       (child): child is THREE.Mesh => child instanceof THREE.Mesh,
     );
-    expect(rig.torso.getObjectByName("torso-shell")).toBeInstanceOf(THREE.Mesh);
     expect(torsoMeshes.some((mesh) => mesh.geometry instanceof THREE.BoxGeometry)).toBe(false);
+    expect(torsoMeshes.some((mesh) => mesh.geometry instanceof THREE.CapsuleGeometry)).toBe(false);
   });
 
   it("keeps the hair crown above the homeowner's eyes", () => {

@@ -55,13 +55,16 @@ export class OwnerAnimator {
     const armFree = (1 - this.carry * 0.85) * (1 - this.reach * 0.9);
     this.rig.armLeft.rotation.x = -swing * 0.75 * armFree + this.carry * -1.1 + this.reach * -1.35;
     this.rig.armRight.rotation.x = swing * 0.75 * armFree + this.carry * -1.1 + this.reach * -1.35;
-    this.rig.armLeft.rotation.z = 0.1 + this.carry * 0.22 + this.surprise * 0.55;
-    this.rig.armRight.rotation.z = -0.1 - this.carry * 0.22 - this.surprise * 0.55;
+    // Arms hang and swing slightly *outward*, clear of the hips. The signs
+    // used to be inverted, which tucked both hands into the trouser tops.
+    this.rig.armLeft.rotation.z = -0.11 - this.carry * 0.22 - this.surprise * 0.55;
+    this.rig.armRight.rotation.z = 0.11 + this.carry * 0.22 + this.surprise * 0.55;
     this.rig.forearmLeft.rotation.x = -0.22 - this.carry * 1.15 - this.reach * 0.5 - this.alarm * 0.2;
     this.rig.forearmRight.rotation.x = -0.22 - this.carry * 1.15 - this.reach * 0.5 - this.alarm * 0.2;
 
     // Hips bob twice per stride and sway with the supporting leg.
-    this.rig.hips.position.y = 1.28 - Math.abs(Math.sin(angle)) * 0.045 * moving - this.reach * 0.42;
+    this.rig.hips.position.y = this.rig.hipHeight
+      - Math.abs(Math.sin(angle)) * 0.045 * moving - this.reach * 0.42;
     this.rig.hips.rotation.z = Math.sin(angle) * 0.05 * moving - this.smoothedTurn * 0.05;
     this.rig.hips.rotation.y = -Math.sin(angle) * 0.12 * moving;
 

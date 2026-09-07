@@ -196,7 +196,7 @@ export const MODEL_REGISTRY: readonly ModelEntry[] = [
     id: "homeowner",
     label: "Homeowner (NPC)",
     category: "character",
-    description: "Jointed human figure with walk cycle, look-at head, carry pose, and alert mark.",
+    description: "Human figure clothed in continuous skinned surfaces — one shirt from hem to collar over a real shoulder cap, a sleeve per arm, and a trouser leg per side that close the crotch between them — with shaped shoes on real ankles, a lofted head, look-at gaze, carry pose, and alert mark.",
     instantiate: () => {
       const rig = buildOwner();
       return { object: rig.root, driver: new OwnerDriver(new OwnerAnimator(rig)) };
