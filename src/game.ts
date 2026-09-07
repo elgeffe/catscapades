@@ -23,7 +23,7 @@ import { PhysicsWorld, type CharacterBody, type DynamicBody } from "./physics/ph
 import { buildLevel, type LevelHandles } from "./level/level-builder";
 import {
   OWNER_ROUTINE, POINTS_OF_INTEREST, PROPS, SINK_BASIN, SPAWN, STATIONS, WORLD,
-  type PropSpec, type StationSpec,
+  type PropSpec, type RoutineStop, type StationSpec,
 } from "./level/level-data";
 import { CameraDirector } from "./camera/camera-director";
 import { CatController, type CatFrameState } from "./cat/cat-controller";
@@ -62,6 +62,9 @@ const SWIPE_CONTACT = 0.48;
 /** Length of a mouth pickup, and the fraction at which the jaw closes. */
 const BITE_DURATION = 0.46;
 const BITE_CONTACT = 0.6;
+/** How long the homeowner spends picking the cat up and carrying it out. */
+const CATCH_DURATION = 2.2;
+
 const FIXED_STEP = 1 / 60;
 /**
  * Catch-up ceiling. Eight steps lets a machine running at 10 FPS still advance
@@ -137,6 +140,14 @@ export class CatscapadesGame {
   private ownerSearchIndex = 0;
   private ownerSearchTime = 0;
   private ownerSearchHeading = 0;
+  /** Progress through the current routine action, 0..1. */
+  private routinePhase = 0;
+  /** The homeowner's own hand on the cupboard door, separate from the cat's. */
+  private ownerCupboardOpen = false;
+  /** Prop id currently in the homeowner's hand, if any. */
+  private ownerHolding: string | null = null;
+  /** Disturbances already reacted to, so each is an event and not a stream. */
+  private readonly noticedDisturbances = new Set<string>();
   /** Sight sample points on the cat, reused every frame. */
   private readonly sightSamples = [
     new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(),
@@ -416,9 +427,8 @@ export class CatscapadesGame {
     this.caughtCooldown = Math.max(0, this.caughtCooldown - dt);
     this.toastTimer = Math.max(0, this.toastTimer - dt);
     this.zoneLabelTimer = Math.max(0, this.zoneLabelTimer - dt);
-    this.catchSequence = Math.max(0, this.catchSequence - dt);
-
-    const controllable = this.catchSequence <= 0;
+    const held = this.catchSequence > 0;
+    const controllable = !held;
     this.stalkRequested = input.stalk && controllable;
     this.catState = this.controller.update(
       dt,
@@ -444,6 +454,9 @@ export class CatscapadesGame {
     this.ownerBody.feet(this.ownerPosition);
     this.owner.root.position.copy(this.ownerPosition);
     this.owner.root.rotation.y = this.ownerFacing;
+    // Last, because the cat rides the homeowner's hands: the socket has to be
+    // where they are standing this frame, not where they were last frame.
+    this.advanceCatchSequence(dt);
 
     if (controllable) this.handleActions(input);
     this.updateWorldState(dt);
@@ -764,8 +777,12 @@ export class CatscapadesGame {
       }
     }
 
+    // Either the cat hooked it open or the homeowner has their hand on it. The
+    // cat's flag is kept separate so a homeowner closing the door behind
+    // themselves cannot quietly undo the cat's preparation.
     this.level.cupboardDoor.rotation.y = damp(
-      this.level.cupboardDoor.rotation.y, this.cupboardOpen ? -1.32 : 0, 6, dt,
+      this.level.cupboardDoor.rotation.y,
+      this.cupboardOpen || this.ownerCupboardOpen ? -1.32 : 0, 6, dt,
     );
 
     for (const prop of this.props) {
@@ -873,17 +890,24 @@ export class CatscapadesGame {
       const stop = OWNER_ROUTINE[this.ownerStop] ?? OWNER_ROUTINE[0];
       if (stop) {
         this.ownerTarget.set(stop.position[0], 0, stop.position[1]);
-        this.ownerReach = stop.action === "reach" ? 1 : 0;
-        this.ownerCarrying = stop.action === "carry";
         if (stop.lookAt) this.ownerLookAt.set(stop.lookAt[0], stop.lookAt[1], stop.lookAt[2]);
         if (this.moveOwnerToward(this.ownerTarget, 1.35, dt)) {
-          // Stood at the stop: face the thing being attended to.
+          // Stood at the stop: face the thing being attended to and do it.
           if (stop.lookAt) this.turnOwnerToward(stop.lookAt[0], stop.lookAt[2], dt);
           this.ownerDwell += dt;
+          this.performRoutineAction(stop, clamp(this.ownerDwell / stop.dwell, 0, 1), dt);
           if (this.ownerDwell > stop.dwell) {
             this.ownerDwell = 0;
+            this.finishRoutineAction(stop);
             this.ownerStop = (this.ownerStop + 1) % OWNER_ROUTINE.length;
           }
+        } else {
+          // Travelling. Poses belong to the stop, not to the walk there: a
+          // homeowner crouching to wipe a worktop while crossing the room is
+          // the single clearest tell that nothing they do is real.
+          this.ownerReach = damp(this.ownerReach, 0, 8, dt);
+          this.ownerCarrying = stop.action === "carry";
+          this.routinePhase = 0;
         }
       }
       // Suspicion now climbs with how plainly the cat is seen rather than with
@@ -1002,6 +1026,121 @@ export class CatscapadesGame {
       4, dt,
     );
     this.ownerSurprise = Math.max(0, this.ownerSurprise - dt * 1.6);
+  }
+
+  /**
+   * Plays out a routine action over its dwell, from `progress` 0 to 1.
+   *
+   * Each action has a moment where the homeowner would notice the cat's work.
+   * Reaching for a kettle that has been batted off the worktop, or finding the
+   * cupboard already hanging open, is both the personality and the exploit:
+   * the routine becomes something the player is deliberately interfering with.
+   */
+  private performRoutineAction(stop: RoutineStop, progress: number, dt: number): void {
+    this.routinePhase = progress;
+    switch (stop.action) {
+      case "wipe": {
+        // Reach out, sweep back and forth, straighten up.
+        this.ownerReach = damp(this.ownerReach, smoothstep(0, 0.18, progress)
+          * (1 - smoothstep(0.82, 1, progress)), 7, dt);
+        this.ownerCarrying = false;
+        const sweep = Math.sin(progress * Math.PI * 5) * 0.5;
+        this.ownerLookAt.set(
+          (stop.lookAt?.[0] ?? this.ownerPosition.x) + sweep,
+          stop.lookAt?.[1] ?? 1.4,
+          stop.lookAt?.[2] ?? this.ownerPosition.z,
+        );
+        return;
+      }
+      case "cupboard": {
+        this.ownerReach = damp(this.ownerReach, smoothstep(0.05, 0.2, progress)
+          * (1 - smoothstep(0.78, 0.95, progress)) * 0.55, 7, dt);
+        this.ownerCarrying = false;
+        // The door swings open under their hand and shuts again behind it —
+        // unless the cat got there first, in which case they find it open.
+        const opening = progress > 0.2 && progress < 0.85;
+        if (opening && !this.ownerCupboardOpen) {
+          this.ownerCupboardOpen = true;
+          if (this.cupboardOpen) this.noticeDisturbance("cupboard-open");
+        }
+        if (!opening) this.ownerCupboardOpen = false;
+        return;
+      }
+      case "kettle": {
+        const prop = this.props.find((candidate) => candidate.spec.id === "kettle");
+        const reach = smoothstep(0.06, 0.22, progress) * (1 - smoothstep(0.76, 0.94, progress));
+        this.ownerReach = damp(this.ownerReach, reach, 7, dt);
+        if (!prop || prop.broken) {
+          this.ownerCarrying = false;
+          return;
+        }
+        prop.body.position(this.ownerMeasure);
+        const displaced = Math.hypot(
+          this.ownerMeasure.x - prop.spec.position[0],
+          this.ownerMeasure.z - prop.spec.position[2],
+        ) > 0.45 || this.ownerMeasure.y < prop.spec.position[1] - 0.4;
+
+        if (progress > 0.24 && progress < 0.8) {
+          if (displaced && this.ownerHolding !== "kettle") {
+            // Groping for a kettle that is not there.
+            this.noticeDisturbance("kettle-gone");
+            this.ownerCarrying = false;
+            return;
+          }
+          if (this.ownerHolding !== "kettle") {
+            this.ownerHolding = "kettle";
+            prop.body.setCarried(true);
+          }
+          this.ownerCarrying = true;
+          return;
+        }
+        if (this.ownerHolding === "kettle") this.releaseOwnerHold();
+        this.ownerCarrying = false;
+        return;
+      }
+      case "carry":
+        this.ownerReach = damp(this.ownerReach, 0, 7, dt);
+        this.ownerCarrying = true;
+        return;
+      default:
+        this.ownerReach = damp(this.ownerReach, 0, 7, dt);
+        this.ownerCarrying = false;
+    }
+  }
+
+  /** Cleans up whatever the action left held or open. */
+  private finishRoutineAction(stop: RoutineStop): void {
+    this.routinePhase = 0;
+    if (stop.action === "kettle") this.releaseOwnerHold();
+    if (stop.action === "cupboard") this.ownerCupboardOpen = false;
+    this.ownerReach = 0;
+  }
+
+  /** Puts down whatever the homeowner is holding, back on its own surface. */
+  private releaseOwnerHold(): void {
+    if (this.ownerHolding === null) return;
+    const prop = this.props.find((candidate) => candidate.spec.id === this.ownerHolding);
+    this.ownerHolding = null;
+    if (!prop) return;
+    prop.body.setCarried(false);
+    prop.body.teleport(this.scratchVector.set(
+      prop.spec.position[0], prop.spec.position[1], prop.spec.position[2],
+    ));
+  }
+
+  /**
+   * The homeowner notices something the cat has done. Surprise plus suspicion,
+   * once per disturbance, so finding the kettle missing is an event rather
+   * than a per-frame stream of alarm.
+   */
+  private noticeDisturbance(id: string): void {
+    if (this.noticedDisturbances.has(id)) return;
+    this.noticedDisturbances.add(id);
+    this.ownerSurprise = 1;
+    this.suspicion = Math.min(100, this.suspicion + 26);
+    this.showToast(id === "kettle-gone"
+      ? "\u201cWhere on earth is the kettle?\u201d"
+      : "\u201cWho opened this cupboard?\u201d");
   }
 
   private beginPursuit(): void {
@@ -1151,10 +1290,19 @@ export class CatscapadesGame {
     this.emitStimulus(position, 1.2, kind);
   }
 
+  /**
+   * Being caught. Starts a sequence rather than resolving one.
+   *
+   * The cat used to vanish from the homeowner's hands and reappear in the
+   * garden on the same frame, which threw away the funniest moment in the
+   * game. It is now picked up, held, and carried out, and only then put down.
+   */
   private catchCat(): void {
     this.caughtCooldown = 4;
     this.caughtCount += 1;
-    this.catchSequence = 1.4;
+    this.catchSequence = CATCH_DURATION;
+    this.ownerReach = 1;
+    this.ownerSurprise = 0.6;
     if (this.carrying) {
       const prop = this.carrying;
       this.carrying = null;
@@ -1162,12 +1310,41 @@ export class CatscapadesGame {
       prop.body.teleport(prop.body.spawn);
       this.carryAttach = 1;
     }
-    this.controller.teleport(this.scratchVector.set(SPAWN.cat.x, SPAWN.cat.y, SPAWN.cat.z));
-    this.catAnimator.resetSecondaryMotion();
-    this.catTravel = 0;
     this.pending = null;
     this.swipeTimer = 0;
     this.biteTimer = 0;
+    this.showToast("Scooped up. There is no dignified way out of this.");
+  }
+
+  /**
+   * Runs the catch: the homeowner straightens up with the cat in their hands,
+   * walks it to the back door, and puts it down in the garden.
+   */
+  private advanceCatchSequence(dt: number): void {
+    if (this.catchSequence <= 0) return;
+    const remaining = this.catchSequence;
+    this.catchSequence = Math.max(0, remaining - dt);
+    const progress = 1 - this.catchSequence / CATCH_DURATION;
+
+    // Lifted clear of the floor and held against the homeowner.
+    this.ownerReach = damp(this.ownerReach, 1 - smoothstep(0.1, 0.4, progress), 6, dt);
+    this.ownerCarrying = progress > 0.25;
+    this.owner.handAnchor.updateWorldMatrix(true, false);
+    this.owner.handAnchor.getWorldPosition(this.scratchVector);
+    this.scratchVector.y += 0.1;
+    this.controller.hold(this.scratchVector, this.ownerFacing + Math.PI);
+    this.cat.root.position.copy(this.scratchVector);
+    this.cat.root.rotation.y = this.ownerFacing + Math.PI;
+    this.ownerLookAt.copy(this.scratchVector);
+
+    if (this.catchSequence > 0) return;
+
+    // Deposited in the garden, with great ceremony.
+    this.controller.teleport(this.scratchVector.set(SPAWN.cat.x, SPAWN.cat.y, SPAWN.cat.z));
+    this.catAnimator.resetSecondaryMotion();
+    this.catTravel = 0;
+    this.ownerReach = 0;
+    this.ownerCarrying = false;
     this.ownerState = "returning";
     this.ownerDwell = 0;
     // The cat is back in the garden; nothing the homeowner remembers seeing is
@@ -1175,7 +1352,7 @@ export class CatscapadesGame {
     this.ownerHasLastSeen = false;
     this.ownerLastSeenAge = Infinity;
     this.suspicion = 30;
-    this.showToast("Caught, carried outside, and deposited with great ceremony.");
+    this.showToast("Carried outside and deposited with great ceremony.");
   }
 
   // -- presentation ----------------------------------------------------------
@@ -1226,6 +1403,7 @@ export class CatscapadesGame {
     animation.meow = this.meowTimer > 0 ? Math.sin((1 - this.meowTimer / 0.9) * Math.PI) : 0;
     animation.carrying = this.carrying !== null;
     animation.sleeping = this.innocenceWeight;
+    animation.held = this.catchSequence > 0 ? 1 : 0;
     animation.alert = clamp(
       (this.ownerState === "pursuing" ? 1 : 0)
       + (this.controller.availableJumpTarget() ? 0.55 : 0)
@@ -1248,6 +1426,18 @@ export class CatscapadesGame {
       lookAt: this.ownerLookAt,
     });
     this.ownerTravel = 0;
+
+    // Whatever the homeowner is holding rides their hand socket.
+    if (this.ownerHolding !== null) {
+      const held = this.props.find((candidate) => candidate.spec.id === this.ownerHolding);
+      if (held) {
+        this.owner.handAnchor.updateWorldMatrix(true, false);
+        this.owner.handAnchor.getWorldPosition(this.scratchVector);
+        this.owner.handAnchor.getWorldQuaternion(this.scratchQuaternion);
+        held.object.position.lerp(this.scratchVector, 0.45);
+        held.object.quaternion.slerp(this.scratchQuaternion, 0.45);
+      }
+    }
 
     // Carried props ride the mouth socket rather than being re-simulated, but
     // they *arrive* over a moment: snapping them there on the frame of the
@@ -1350,7 +1540,9 @@ export class CatscapadesGame {
       + `  stride/s ${this.catAnimator.strideRate().toFixed(2)}`,
       `Jump target  ${this.controller.availableJumpTarget()?.id ?? "—"}`,
       `Carrying     ${this.carrying?.spec.id ?? "—"}`,
-      `Owner        ${this.ownerState}  suspicion ${Math.round(this.suspicion)}`,
+      `Owner        ${this.ownerState}  suspicion ${Math.round(this.suspicion)}`
+      + `  doing ${OWNER_ROUTINE[this.ownerStop]?.action ?? "-"} ${this.routinePhase.toFixed(2)}`
+      + (this.ownerHolding ? `  holding ${this.ownerHolding}` : ""),
       `Sight        ${this.ownerSight.reason}  clarity ${this.ownerSight.clarity.toFixed(2)}`
       + `  last seen ${this.ownerHasLastSeen ? `${this.ownerLastSeenAge.toFixed(1)}s ago` : "never"}`,
       `Camera       ${this.director.currentZoneId()}`,

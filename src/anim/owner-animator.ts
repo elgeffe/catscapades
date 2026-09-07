@@ -184,7 +184,8 @@ export class OwnerAnimator {
     const shift = wobble(this.time * 0.21, 3.4) * standing;
     this.rig.hips.position.y = this.rig.hipHeight - STANDING_FLEX
       - Math.abs(Math.sin(angle)) * 0.03 * moving
-      - Math.abs(shift) * 0.008 - this.reach * 0.42;
+      - Math.abs(shift) * 0.008 - this.reach * 0.42
+      + this.surprise * 0.035;
     this.rig.hips.rotation.z = damp(
       this.rig.hips.rotation.z, Math.sin(angle) * 0.045 * moving + lean + shift * 0.035, 9, dt,
     );
@@ -195,10 +196,12 @@ export class OwnerAnimator {
     );
 
     const breath = Math.sin(this.time * 1.9) * 0.012 * standing;
+    // Surprise is a recoil: the chest pulls back and up, the head snaps, and
+    // the whole figure rises onto the balls of its feet for a moment.
     this.rig.torso.rotation.x = damp(
       this.rig.torso.rotation.x,
-      this.smoothedSpeed * 0.035 + this.reach * 0.85 - this.surprise * 0.28 - breath,
-      8, dt,
+      this.smoothedSpeed * 0.035 + this.reach * 0.85 - this.surprise * 0.34 - breath,
+      this.surprise > 0.2 ? 16 : 8, dt,
     );
     // The shoulders counter-rotate against the hips, and lead into a turn.
     this.rig.torso.rotation.y = damp(

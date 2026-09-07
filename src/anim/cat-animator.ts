@@ -88,6 +88,12 @@ export interface CatAnimationInput {
   sleeping: number;
   /** Upright sit weight. */
   sitting: number;
+  /**
+   * Being carried by the homeowner, 0..1. Limbs hang, the spine goes slack,
+   * the tail drops, and the head stays up and affronted — which is the whole
+   * joke, and is worth showing rather than cutting to the cat being outside.
+   */
+  held: number;
   /** Ears-forward, tail-up interest, 0..1. */
   alert: number;
   /** World point to look at, or null for gaze-along-travel. */
@@ -122,6 +128,7 @@ export const NEUTRAL_CAT_ANIMATION: CatAnimationInput = {
   carrying: false,
   sleeping: 0,
   sitting: 0,
+  held: 0,
   alert: 0,
   lookAt: null,
   landImpact: 0,
@@ -260,6 +267,7 @@ export class CatAnimator {
   private crouchWeight = 0;
   private sitWeight = 0;
   private sleepWeight = 0;
+  private heldWeight = 0;
   private carryWeight = 0;
   private braceWeight = 0;
   private coilWeight = 0;
@@ -355,6 +363,8 @@ export class CatAnimator {
   resetSecondaryMotion(): void {
     this.tailInitialised = false;
     this.tailAccumulator = 0;
+    // A cat that has just been put down is standing, not still dangling.
+    this.heldWeight = 0;
     this.rig.legs.forEach((leg, index) => {
       const contact = this.contacts[index];
       if (!contact) return;
@@ -442,6 +452,10 @@ export class CatAnimator {
     this.crouchWeight = damp(this.crouchWeight, crouchTarget, 8, dt);
     this.sitWeight = damp(this.sitWeight, input.sitting, 6, dt);
     this.sleepWeight = damp(this.sleepWeight, input.sleeping, 3.2, dt);
+    // Released fast: the dangle targets sit below the floor, which is right in
+    // mid-air and looks like a cat lying in pieces once it is put down.
+    const heldTarget = clamp(input.held, 0, 1);
+    this.heldWeight = damp(this.heldWeight, heldTarget, heldTarget > this.heldWeight ? 7 : 18, dt);
     this.carryWeight = damp(this.carryWeight, input.carrying ? 1 : 0, 7, dt);
     this.braceWeight = damp(this.braceWeight, clamp(input.brake, 0, 1), 11, dt);
     // The coil is owned by the controller's gather window, which is short and
@@ -481,9 +495,12 @@ export class CatAnimator {
     const biteDip = -Math.sin(clamp(input.bite, 0, 1) * Math.PI) * 0.05;
     const sitLift = -this.sitWeight * 0.09;
     const sleepDrop = -this.sleepWeight * 0.17;
+    // Held, the body hangs slightly nose-down and stops carrying itself.
+    const heldSag = this.heldWeight * 0.03;
 
     const height = this.rig.standHeight * rideScale + bob + gallopDrop + airborneLift
-      + landCrouch + idleBreath + sitLift + sleepDrop + braceDrop + coilDrop + biteDip;
+      + landCrouch + idleBreath + sitLift + sleepDrop + braceDrop + coilDrop + biteDip
+      + heldSag;
     this.bodyLift = damp(this.bodyLift, height, 22, dt);
     this.rig.body.position.y = this.bodyLift;
 
@@ -493,7 +510,7 @@ export class CatAnimator {
     const landPitch = input.landImpact * 0.22;
     const restPitch = -this.sitWeight * 0.24 + this.sleepWeight * 0.018;
     const targetPitch = accelPitch + flightPitch + landPitch + restPitch
-      + this.braceWeight * 0.06 - this.coilWeight * 0.07
+      + this.braceWeight * 0.06 - this.coilWeight * 0.07 + this.heldWeight * 0.16
       + Math.sin(this.cycle * Math.PI * 2) * gait.flex * 0.35 * motion;
     this.bodyPitch = damp(this.bodyPitch, targetPitch, 14, dt);
     this.rig.body.rotation.x = this.bodyPitch;
@@ -774,6 +791,18 @@ export class CatAnimator {
         curl = lerp(curl, leg.isFront ? 0.14 : 0.18, asleep);
       }
 
+      // Held aloft: nothing is standing on anything, so the limbs simply hang
+      // from their sockets and swing a little.
+      if (this.heldWeight > 0.01) {
+        const dangle = this.heldWeight;
+        const swing = wobble(this.time * 1.7, leg.isFront ? 2.4 : 5.1) * 0.05;
+        z = lerp(z, leg.restTarget.z * 0.55 + swing, dangle);
+        x = lerp(x, leg.restTarget.x * 0.8, dangle);
+        y = lerp(y, -rideHeight - 0.13, dangle);
+        curl = lerp(curl, 0.22, dangle);
+        groundWeight *= 1 - dangle;
+      }
+
       // A paw strike lifts the near forepaw out of the gait entirely and sends
       // it at the object, rather than swatting a fixed spot in front of the
       // chest and hoping the object happens to be there.
@@ -893,6 +922,9 @@ export class CatAnimator {
     // haunches rather than following them down.
     targetPitch -= this.coilWeight * 0.16;
     targetPitch += this.sleepWeight * 0.4;
+    // Whatever the body is doing, a carried cat keeps its head level and
+    // looks at you. Countering the sag is the entire performance.
+    targetPitch -= this.heldWeight * 0.42;
     targetYaw += this.sleepWeight * 0.28;
 
     // A pickup is a committed movement on a deadline: the jaw closes at 0.6 of

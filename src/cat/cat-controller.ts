@@ -176,6 +176,29 @@ export class CatController {
     this.body.setFeetPosition(to);
   }
 
+  /**
+   * Places the cat somewhere it is being carried, without a teleport's reset.
+   *
+   * A teleport clears the tail simulation and the ground contacts, which is
+   * right when the cat is put down somewhere else and wrong every frame it is
+   * being held: the tail should swing and the limbs should hang. This keeps
+   * the secondary motion running and simply parks the body where the hands
+   * are, leaving the animator to make it look carried.
+   */
+  hold(to: THREE.Vector3, facing: number): void {
+    this.previousPosition.copy(this.position);
+    this.position.copy(to);
+    this.velocity.set(0, 0, 0);
+    this.facing = facing;
+    this.desiredFacing = facing;
+    this.grounded = false;
+    this.airborneBlend = 0;
+    this.jumping = false;
+    this.arcDuration = 0;
+    this.gathering = false;
+    this.body.setFeetPosition(to);
+  }
+
   update(dt: number, input: CatMoveInput, forward: THREE.Vector3, right: THREE.Vector3): CatFrameState {
     this.previousPosition.copy(this.position);
     this.coyote = Math.max(0, this.coyote - dt);

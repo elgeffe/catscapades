@@ -147,4 +147,48 @@ describe("level data", () => {
       expect(stop.dwell).toBeGreaterThan(0);
     }
   });
+
+  it("stands the homeowner where the thing they are handling actually is", () => {
+    // Each purposeful action reaches for something real. A kettle stop metres
+    // from the kettle plays the whole animation into thin air, which reads as
+    // the routine being decorative — the specific failure the actions exist to
+    // remove.
+    const near = (
+      stop: (typeof OWNER_ROUTINE)[number],
+      at: readonly [number, number, number],
+      within: number,
+    ) => {
+      expect(
+        Math.hypot(stop.position[0] - at[0], stop.position[1] - at[2]),
+        `${stop.action} stop is not within reach of its target`,
+      ).toBeLessThan(within);
+    };
+
+    const kettle = PROPS.find((prop) => prop.id === "kettle");
+    expect(kettle).toBeDefined();
+    const kettleStop = OWNER_ROUTINE.find((stop) => stop.action === "kettle");
+    expect(kettleStop, "no kettle stop in the routine").toBeDefined();
+    near(kettleStop!, kettle!.position, 1.9);
+
+    const cupboard = STATIONS.find((station) => station.id === "cupboard");
+    expect(cupboard).toBeDefined();
+    const cupboardStop = OWNER_ROUTINE.find((stop) => stop.action === "cupboard");
+    expect(cupboardStop, "no cupboard stop in the routine").toBeDefined();
+    near(cupboardStop!, cupboard!.position, 1.9);
+  });
+
+  it("gives every action something to face", () => {
+    for (const stop of OWNER_ROUTINE) {
+      if (stop.action === "idle") continue;
+      // The vision cone follows the body and the body turns to `lookAt`, so an
+      // action without one leaves the homeowner facing whichever way they
+      // happened to arrive.
+      expect(stop.lookAt, `${stop.action} stop has nothing to face`).toBeDefined();
+      const distance = Math.hypot(
+        stop.lookAt![0] - stop.position[0], stop.lookAt![2] - stop.position[1],
+      );
+      expect(distance, `${stop.action} stop faces its own feet`).toBeGreaterThan(0.25);
+      expect(distance, `${stop.action} stop faces across the room`).toBeLessThan(4);
+    }
+  });
 });

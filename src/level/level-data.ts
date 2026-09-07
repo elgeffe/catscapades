@@ -273,20 +273,42 @@ export const SPAWN = {
   owner: new THREE.Vector3(1.8, 0, 1.6),
 } as const;
 
+/**
+ * What the homeowner does at a stop, not merely how they stand there.
+ *
+ * Each action is a phased sequence played out over the stop's dwell, and each
+ * one has something the cat can have disturbed: a kettle that has been batted
+ * off the worktop, a cupboard already hanging open. Finding it disturbed is
+ * what makes the routine worth watching and worth exploiting.
+ */
+export type RoutineAction =
+  /** Stand, look at something, do nothing. */
+  | "idle"
+  /** Wipe down a worktop: reach out, sweep, straighten up. */
+  | "wipe"
+  /** Lift the kettle, hold it, set it back down. */
+  | "kettle"
+  /** Open the wall cupboard, look inside, close it. */
+  | "cupboard"
+  /** Carry something across the room. */
+  | "carry";
+
 /** The homeowner's morning circuit. Each stop has a dwell time and an action. */
 export interface RoutineStop {
   readonly position: readonly [number, number];
   readonly dwell: number;
-  readonly action: "idle" | "reach" | "carry";
+  readonly action: RoutineAction;
   readonly lookAt?: readonly [number, number, number];
 }
 
 export const OWNER_ROUTINE: readonly RoutineStop[] = [
-  { position: [2.4, -5.6], dwell: 3.2, action: "reach", lookAt: [2.2, 1.4, -7.1] },
-  { position: [-0.4, -5.6], dwell: 2.6, action: "reach", lookAt: [-0.4, 1.4, -7.1] },
+  { position: [2.4, -5.6], dwell: 3.2, action: "wipe", lookAt: [2.2, 1.4, -7.1] },
+  // Next to the wall cupboard, which the cat may already have hooked open.
+  { position: [2.2, -5.9], dwell: 3.4, action: "cupboard", lookAt: [2.2, 2.0, -7.2] },
   { position: [10.9, 1.4], dwell: 3.8, action: "idle", lookAt: [10.9, 1.2, -1.6] },
-  { position: [5.6, -5.4], dwell: 2.4, action: "carry", lookAt: [5.3, 1.4, -7.1] },
-  { position: [1.6, 2.2], dwell: 2.0, action: "idle" },
+  // Standing at the kettle, which the cat may already have swiped off.
+  { position: [4.4, -5.5], dwell: 4.2, action: "kettle", lookAt: [4.4, 1.4, -7.1] },
+  { position: [1.6, 2.2], dwell: 2.0, action: "carry", lookAt: [3.4, 1.1, 2.2] },
 ];
 
 /** Points the cat's head is drawn to when nearby — makes attention readable. */

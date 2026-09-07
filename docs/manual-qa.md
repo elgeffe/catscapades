@@ -19,6 +19,10 @@
 - [ ] Watch a swipe and a pickup frame by frame: the paw should reach the object before it moves, and the mouth should close on an item before it attaches.
 - [ ] Swipe an object on your left and one on your right, and confirm the near paw is the one used.
 - [ ] Watch the homeowner walk a full routine lap and confirm the feet plant rather than skate, each step rolls heel to toe, and turns are stepped round rather than spun.
+- [ ] Watch a full routine lap and confirm each stop plays a visible action — wipe, cupboard, kettle — and that no pose is held while walking between stops.
+- [ ] Swipe the kettle off the worktop, then let the homeowner reach for it, and confirm they react to finding it gone.
+- [ ] Hook the cupboard open, then let the homeowner reach it, and confirm they react and leave your preparation standing.
+- [ ] Get caught and watch the whole sequence: picked up, carried, put down in the garden — no teleport.
 - [ ] Stand still and watch them idle: they should shift weight and breathe, not freeze.
 - [ ] Toggle diagnostics with backquote and inspect coordinates, NPC state, camera zone, the vision cone, and render statistics.
 - [ ] Preview `dist/` and smoke-test the deployed GitHub Pages URL and reload.

@@ -162,6 +162,7 @@ const CAT_CLIPS: Readonly<Record<string, CatClipState>> = {
   },
   carry: { input: { speed: 1.6, carrying: true } },
   sit: { input: { sitting: 1, alert: 0.4 } },
+  held: { input: { held: 1, alert: 1 } },
   sleep: { input: { sleeping: 1 } },
 };
 
@@ -198,6 +199,8 @@ const OWNER_CLIPS: Readonly<Record<string, Partial<OwnerAnimationInput>>> = {
   carrying: { speed: 1.1, carrying: true },
   turning: { speed: 1.2, turnRate: 1.6 },
   pivot: { speed: 0, turnRate: 1.4, alarm: 0.3 },
+  surprised: { speed: 0, alarm: 1, surprise: 1 },
+  "holding-cat": { speed: 0.9, carrying: true, reaching: 0.15, alarm: 0.5 },
 };
 
 class OwnerDriver implements ModelDriver {
