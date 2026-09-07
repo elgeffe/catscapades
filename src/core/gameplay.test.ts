@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { evaluateCondition, resolveInteraction, selectCameraZone, stimulusPriority, updateSuspicion } from "./gameplay";
+import {
+  evaluateCondition, resolveInteraction, selectCameraZone, stimulusPriority,
+  swipeLaunchSpeed, updateSuspicion,
+} from "./gameplay";
 
 describe("gameplay rules", () => {
   it("evaluates nested objective conditions", () => {
@@ -31,5 +34,34 @@ describe("gameplay rules", () => {
     expect(selectCameraZone("utility", 5, 4.2)).toBe("utility");
     expect(selectCameraZone("utility", 5, 3.7)).toBe("kitchen");
     expect(selectCameraZone("utility", 8, 6)).toBe("dining");
+  });
+});
+
+describe("swipe launch", () => {
+  it("sends light objects flying and heavy ones grudgingly", () => {
+    const mouseToy = swipeLaunchSpeed(0.03);
+    const book = swipeLaunchSpeed(0.18);
+    const kettle = swipeLaunchSpeed(0.5);
+    const fruitBowl = swipeLaunchSpeed(0.65);
+
+    expect(mouseToy).toBeGreaterThan(book);
+    expect(book).toBeGreaterThan(kettle);
+    expect(kettle).toBeGreaterThan(fruitBowl);
+    // The spread has to be obvious, or the resistance is not readable.
+    expect(mouseToy / fruitBowl).toBeGreaterThan(2.5);
+  });
+
+  it("clamps both ends so nothing leaves the level or refuses to move", () => {
+    expect(swipeLaunchSpeed(0.0001)).toBeLessThanOrEqual(6.4);
+    expect(swipeLaunchSpeed(50)).toBeGreaterThanOrEqual(1.5);
+    expect(swipeLaunchSpeed(0)).toBeLessThanOrEqual(6.4);
+    expect(Number.isFinite(swipeLaunchSpeed(0))).toBe(true);
+  });
+
+  it("gives crockery enough to clear the table edge and break", () => {
+    // The mug must leave the dining table on a swipe, which is the whole
+    // catastrophe. It is fragile, so it is struck rather than pushed.
+    expect(swipeLaunchSpeed(0.32, true)).toBeGreaterThan(swipeLaunchSpeed(0.32));
+    expect(swipeLaunchSpeed(0.32, true)).toBeGreaterThan(2.5);
   });
 });

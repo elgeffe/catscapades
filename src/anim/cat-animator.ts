@@ -58,8 +58,28 @@ export interface CatAnimationInput {
   gather: number;
   /** 0 at take-off, 1 at touchdown. Only meaningful while `airborne > 0`. */
   jumpProgress: number;
-  /** 0 idle, 1 at the peak of a paw strike. */
+  /** 0 idle, 1 through a paw strike. Contact is at 0.5, the peak of the reach. */
   swipe: number;
+  /** Which forepaw strikes: -1 left, 1 right. */
+  swipeSide: -1 | 1;
+  /**
+   * World point the paw is reaching for, or null for a generic swat at
+   * nothing. Aiming is most of what makes a strike look like it connected.
+   */
+  swipeAim: THREE.Vector3 | null;
+  /**
+   * 0 for a felt mouse, 1 for a full kettle. A heavy object checks the paw at
+   * contact and shoves the shoulder back instead of being flicked away.
+   */
+  swipeResistance: number;
+  /**
+   * 0 idle, 1 through a mouth pickup. The head reaches down to `biteAim`, the
+   * jaw opens, and it closes on the object at 0.6 — which is when the game
+   * attaches it, so the cat is seen to take hold of something rather than
+   * having it appear in its mouth.
+   */
+  bite: number;
+  biteAim: THREE.Vector3 | null;
   /** 0 closed, 1 mid-meow. */
   meow: number;
   /** Something is held in the mouth. */
@@ -93,6 +113,11 @@ export const NEUTRAL_CAT_ANIMATION: CatAnimationInput = {
   gather: 0,
   jumpProgress: 0,
   swipe: 0,
+  swipeSide: -1,
+  swipeAim: null,
+  swipeResistance: 0,
+  bite: 0,
+  biteAim: null,
   meow: 0,
   carrying: false,
   sleeping: 0,
@@ -254,6 +279,7 @@ export class CatAnimator {
   private readonly scratchWorld = new THREE.Vector3();
   private readonly scratchRootWorld = new THREE.Vector3();
   private readonly scratchGround = new THREE.Vector3();
+  private readonly scratchAim = new THREE.Vector3();
   private readonly scratchTarget = new THREE.Vector3();
   private readonly scratchDesired = new THREE.Vector3();
   private readonly scratchMidpoint = new THREE.Vector3();
@@ -451,11 +477,13 @@ export class CatAnimator {
     // A sit lowers the haunches while the pitched body and flexed spine keep
     // the chest upright. A loaf settles the sternum almost onto the floor;
     // its folded limbs are then hidden by the continuous chest/haunch skins.
+    // Reaching down for something lowers the whole cat onto its elbows.
+    const biteDip = -Math.sin(clamp(input.bite, 0, 1) * Math.PI) * 0.05;
     const sitLift = -this.sitWeight * 0.09;
     const sleepDrop = -this.sleepWeight * 0.17;
 
     const height = this.rig.standHeight * rideScale + bob + gallopDrop + airborneLift
-      + landCrouch + idleBreath + sitLift + sleepDrop + braceDrop + coilDrop;
+      + landCrouch + idleBreath + sitLift + sleepDrop + braceDrop + coilDrop + biteDip;
     this.bodyLift = damp(this.bodyLift, height, 22, dt);
     this.rig.body.position.y = this.bodyLift;
 
@@ -521,10 +549,20 @@ export class CatAnimator {
     this.chestRoll = damp(this.chestRoll, -targetPelvisRoll * 0.72, 12, dt);
     this.rig.pelvis.rotation.z = this.pelvisRoll;
 
-    // Shoulder counter-roll plus the action-specific swipe twist.
-    const swipeTwist = Math.sin(input.swipe * Math.PI) * 0.42;
-    this.rig.chest.rotation.z = damp(this.rig.chest.rotation.z, this.chestRoll + swipeTwist, 16, dt);
-    this.rig.chest.rotation.y = damp(this.rig.chest.rotation.y, -swipeTwist * 0.5, 16, dt);
+    // Shoulder counter-roll plus the action-specific swipe twist. A heavy
+    // object checks the paw: past contact the shoulder is shoved back instead
+    // of following through, which is the difference between batting a felt
+    // mouse across the room and failing to move a full kettle.
+    const strike = Math.sin(clamp(input.swipe, 0, 1) * Math.PI);
+    const check = smoothstep(0.45, 0.75, clamp(input.swipe, 0, 1))
+      * clamp(input.swipeResistance, 0, 1);
+    const swipeTwist = strike * lerp(0.42, 0.2, check) * input.swipeSide * -1;
+    this.rig.chest.rotation.z = damp(
+      this.rig.chest.rotation.z, this.chestRoll + swipeTwist - check * 0.16 * input.swipeSide, 16, dt,
+    );
+    this.rig.chest.rotation.y = damp(
+      this.rig.chest.rotation.y, -swipeTwist * 0.5 + check * 0.12 * input.swipeSide, 16, dt,
+    );
 
     const breathScale = 1 + Math.sin(this.breath) * 0.012 * (1 - motion * 0.75);
     this.rig.ribcage.scale.set(1 + (breathScale - 1) * 0.55, breathScale, 1);
@@ -736,13 +774,27 @@ export class CatAnimator {
         curl = lerp(curl, leg.isFront ? 0.14 : 0.18, asleep);
       }
 
-      // A paw strike lifts the near-front leg out of the gait entirely.
-      if (input.swipe > 0.01 && leg.id === "front-left") {
-        const strike = Math.sin(input.swipe * Math.PI);
-        z = lerp(z, leg.restTarget.z + 0.24, strike);
-        y = lerp(y, -rideHeight + 0.24, strike);
-        x = lerp(x, leg.restTarget.x + 0.05, strike);
-        curl = lerp(curl, 0.34, strike);
+      // A paw strike lifts the near forepaw out of the gait entirely and sends
+      // it at the object, rather than swatting a fixed spot in front of the
+      // chest and hoping the object happens to be there.
+      if (input.swipe > 0.01 && leg.isFront && leg.side === input.swipeSide) {
+        const progress = clamp(input.swipe, 0, 1);
+        const strike = Math.sin(progress * Math.PI);
+        if (input.swipeAim) {
+          this.scratchAim.copy(input.swipeAim);
+          this.rig.body.worldToLocal(this.scratchAim);
+          // Clamped to what the limb can actually reach: an unreachable target
+          // makes the IK straighten the leg, which reads as a stiff poke.
+          z = lerp(z, clamp(this.scratchAim.z, leg.restTarget.z + 0.04, leg.restTarget.z + 0.3), strike);
+          x = lerp(x, clamp(this.scratchAim.x, -0.2, 0.2), strike);
+          y = lerp(y, clamp(this.scratchAim.y, -rideHeight + 0.02, -rideHeight + 0.36), strike);
+        } else {
+          z = lerp(z, leg.restTarget.z + 0.24, strike);
+          y = lerp(y, -rideHeight + 0.24, strike);
+          x = lerp(x, leg.restTarget.x + 0.05, strike);
+        }
+        // Toes spread on the way out, then hook on contact.
+        curl = lerp(curl, lerp(0.34, -0.1, smoothstep(0.35, 0.6, progress)), strike);
         groundWeight *= 1 - strike;
       }
 
@@ -819,6 +871,23 @@ export class CatAnimator {
     targetYaw -= this.spineYaw * 0.45;
     targetYaw += this.smoothedTurn * 0.06;
 
+    // A pickup reaches the head down to the object. Aiming here rather than
+    // only opening the jaw is what makes the cat look like it took hold of
+    // something instead of the object appearing in its mouth.
+    const bite = clamp(input.bite, 0, 1);
+    if (bite > 0.01 && input.biteAim) {
+      this.scratchAim.copy(input.biteAim);
+      this.scratchMatrix.copy(this.rig.neck.matrixWorld).invert();
+      this.scratchAim.applyMatrix4(this.scratchMatrix);
+      const reachYaw = clamp(Math.atan2(this.scratchAim.x, this.scratchAim.z), -0.7, 0.7);
+      const reachPitch = clamp(
+        -Math.atan2(this.scratchAim.y, Math.hypot(this.scratchAim.x, this.scratchAim.z)),
+        -0.4, 0.95,
+      );
+      targetYaw = lerp(targetYaw, reachYaw, bite);
+      targetPitch = lerp(targetPitch, reachPitch, bite);
+    }
+
     targetPitch += this.crouchWeight * 0.2 + this.carryWeight * 0.24 - input.meow * 0.45;
     // A coiling cat holds its head level and locked on: counter the sinking
     // haunches rather than following them down.
@@ -826,11 +895,18 @@ export class CatAnimator {
     targetPitch += this.sleepWeight * 0.4;
     targetYaw += this.sleepWeight * 0.28;
 
-    const rate = input.lookAt ? 7 : 3.4;
+    // A pickup is a committed movement on a deadline: the jaw closes at 0.6 of
+    // the bite, so the head has to be there by then, not easing towards it.
+    const rate = bite > 0.01 ? 13 : input.lookAt ? 7 : 3.4;
     this.headYaw = damp(this.headYaw, targetYaw, rate, dt);
     this.headPitch = damp(this.headPitch, targetPitch, rate, dt);
     this.rig.head.rotation.set(this.headPitch, this.headYaw, -this.bodyRoll * 0.5 + this.sleepWeight * 0.07);
-    this.rig.neck.rotation.x = damp(this.rig.neck.rotation.x, this.headPitch * 0.35 + this.carryWeight * 0.18, 8, dt);
+    // The neck extends into the reach as well as the head pitching.
+    this.rig.neck.rotation.x = damp(
+      this.rig.neck.rotation.x,
+      this.headPitch * 0.35 + this.carryWeight * 0.18 + bite * 0.32,
+      bite > 0.01 ? 13 : 8, dt,
+    );
     this.rig.neck.rotation.y = damp(this.rig.neck.rotation.y, this.sleepWeight * 0.08, 6, dt);
   }
 
@@ -848,8 +924,12 @@ export class CatAnimator {
       ear.rotation.y = damp(ear.rotation.y, side * (this.earAlert * 0.1) + twitch * 0.5, 8, dt);
     }
 
-    // Jaw: opens for a meow, stays shut with something in it.
-    const jawOpen = input.meow * 0.42 - this.carryWeight * 0.04;
+    // Jaw: opens for a meow, opens wide and shuts on a pickup, stays shut with
+    // something in it. The close at 0.6 is the frame the game attaches the
+    // object, so the bite and the pickup are the same event.
+    const bite = clamp(input.bite, 0, 1);
+    const biteOpen = Math.sin(smoothstep(0, 0.62, bite) * Math.PI) * 0.5;
+    const jawOpen = Math.max(input.meow * 0.42, biteOpen) - this.carryWeight * 0.04;
     this.rig.jaw.rotation.x = damp(this.rig.jaw.rotation.x, jawOpen, 18, dt);
 
     // Blinking, and a slow-blink while asleep.

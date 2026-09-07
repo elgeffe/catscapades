@@ -15,6 +15,9 @@
 - [ ] Crouch behind the counter run, then climb onto the worktop, and confirm only the second one gets you seen.
 - [ ] Get spotted, break line of sight, and confirm they walk to where you *were*, sweep it, and give up rather than tracking you through the furniture.
 - [ ] Hold still while being hunted, and confirm stillness and the cardboard box both make you harder to see.
+- [ ] Swipe the mouse toy, the paperback, the kettle and the fruit bowl, and confirm each moves by an obviously different amount.
+- [ ] Watch a swipe and a pickup frame by frame: the paw should reach the object before it moves, and the mouth should close on an item before it attaches.
+- [ ] Swipe an object on your left and one on your right, and confirm the near paw is the one used.
 - [ ] Watch the homeowner walk a full routine lap and confirm the feet plant rather than skate, each step rolls heel to toe, and turns are stepped round rather than spun.
 - [ ] Stand still and watch them idle: they should shift weight and breathe, not freeze.
 - [ ] Toggle diagnostics with backquote and inspect coordinates, NPC state, camera zone, the vision cone, and render statistics.

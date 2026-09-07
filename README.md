@@ -12,6 +12,7 @@ A desktop browser stealth-comedy MVP about an extremely innocent cat. Observe a 
 - Four authored semi-fixed camera compositions, including utility-nook coverage, with dead zones, look-ahead, FOV blending, separated movement-basis blending, and transition hysteresis
 - A three-room house built from typed level data: kitchen, breakfast room, utility nook and garden, with procedural wood, tile, grass and plaster surfaces
 - Contextual paw actions, five carryable item types, and escalating disaster states (running sink → pooling → overflow, punctured flour, opened cupboard, broken crockery)
+- Interactions that visibly connect: the near paw is aimed at the object it is hitting, force lands on the contact frame rather than the button press, pickups animate a reach and a bite before the object attaches, and the launch speed falls off with mass so a felt mouse skitters where a kettle grudgingly shifts
 - One homeowner with a morning routine, stimulus investigation, suspicion, pursuit and forgiving catch/reset behaviour
 - Believable homeowner perception: a directional vision cone with peripheral falloff, real line of sight traced against the walls and furniture, and stillness and the cardboard box as genuine cover; losing them sends them to where you *were*, to sweep it and search rather than track you through the cupboards
 - Six-stage objective chain, multi-condition finale, and four optional challenges

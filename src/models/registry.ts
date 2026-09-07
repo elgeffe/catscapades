@@ -70,6 +70,17 @@ interface CatClipState {
   readonly at?: (time: number, input: CatAnimationInput) => void;
 }
 
+/** Progress through a one-shot action, held at 1 once it has finished. */
+function clampUnit(value: number): number {
+  return value <= 0 ? 0 : value >= 1 ? 1 : value;
+}
+
+// Fixed world points for the action clips. The cat sits at the origin in the
+// viewer, so these are the object positions a strike or a bite aims at.
+const SWIPE_TARGET = new THREE.Vector3(-0.12, 0.24, 0.44);
+const SWIPE_TARGET_HEAVY = new THREE.Vector3(0.14, 0.2, 0.42);
+const BITE_TARGET = new THREE.Vector3(0.02, 0.06, 0.46);
+
 const CAT_CLIPS: Readonly<Record<string, CatClipState>> = {
   idle: { input: {} },
   "idle-alert": { input: { alert: 1 } },
@@ -120,7 +131,30 @@ const CAT_CLIPS: Readonly<Record<string, CatClipState>> = {
   crouch: { input: { gather: 1, alert: 1 } },
   swipe: {
     input: { alert: 0.8 },
-    at: (time, input) => { input.swipe = Math.max(0, Math.sin((time % 1.4) / 0.45 * Math.PI)); },
+    at: (time, input) => {
+      input.swipe = clampUnit((time % 1.4) / 0.45);
+      input.swipeSide = -1;
+      // A light object out in front and to the near side.
+      input.swipeAim = SWIPE_TARGET;
+    },
+  },
+  "swipe-heavy": {
+    input: { alert: 0.8 },
+    at: (time, input) => {
+      input.swipe = clampUnit((time % 1.6) / 0.58);
+      input.swipeSide = 1;
+      input.swipeResistance = 1;
+      input.swipeAim = SWIPE_TARGET_HEAVY;
+    },
+  },
+  bite: {
+    input: { alert: 0.6 },
+    at: (time, input) => {
+      input.bite = clampUnit((time % 1.5) / 0.46);
+      input.biteAim = BITE_TARGET;
+      // Once the jaw has closed, the cat is carrying it.
+      input.carrying = input.bite >= 0.62;
+    },
   },
   meow: {
     input: { alert: 1 },

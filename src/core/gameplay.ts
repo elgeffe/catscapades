@@ -84,3 +84,26 @@ export function selectCameraZone(current: string, x: number, z: number): string 
   }
   return "kitchen";
 }
+
+/**
+ * How fast a swiped object leaves the paw, given its mass.
+ *
+ * A paw flick delivers roughly a fixed impulse, so what leaves fast is what is
+ * light: a felt mouse skitters across the room, a paperback slides, and a full
+ * kettle grudgingly shifts. Fully compensating for mass — which the game used
+ * to do, launching everything at the same speed — makes every object on the
+ * worktop behave identically, which is the least interesting possible answer
+ * to "what happens when a cat hits this".
+ *
+ * Clamped at both ends: the lightest props would otherwise leave the level,
+ * and the heaviest would not visibly move at all.
+ */
+export function swipeLaunchSpeed(mass: number, fragile = false): number {
+  const FLICK = 1.55;
+  const FALLOFF = 0.55;
+  const raw = FLICK / Math.pow(Math.max(mass, 0.01), FALLOFF);
+  const clamped = raw < 1.5 ? 1.5 : raw > 6.4 ? 6.4 : raw;
+  // Crockery is struck rather than pushed, so it goes slightly further — and
+  // has to clear the table edge to break.
+  return clamped * (fragile ? 1.12 : 1);
+}

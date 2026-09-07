@@ -2,7 +2,9 @@ import * as THREE from "three";
 import type { InputFrame } from "./input";
 import { TinyAudio } from "./audio";
 import type { GameSettings } from "./settings";
-import { resolveInteraction, type InteractionCandidate } from "./core/gameplay";
+import {
+  resolveInteraction, swipeLaunchSpeed, type InteractionCandidate,
+} from "./core/gameplay";
 import {
   isCatastropheReady, OBJECTIVE_DEFINITIONS, OPTIONAL_OBJECTIVE_DEFINITIONS,
 } from "./core/level-model";
@@ -35,6 +37,14 @@ interface Objective {
   optional?: boolean;
 }
 
+/** A committed interaction, waiting for the animation to reach contact. */
+interface PendingAction {
+  readonly kind: "swipe" | "carry" | "station";
+  readonly key: string;
+  /** Seconds until the contact frame. */
+  remaining: number;
+}
+
 interface LiveProp {
   readonly spec: PropSpec;
   readonly object: THREE.Object3D;
@@ -45,6 +55,13 @@ interface LiveProp {
   settledHeight: number;
 }
 
+/** Base length of a paw strike. Heavier objects earn a slower, heavier one. */
+const SWIPE_DURATION = 0.42;
+/** Fraction of a strike at which the paw reaches the object. */
+const SWIPE_CONTACT = 0.48;
+/** Length of a mouth pickup, and the fraction at which the jaw closes. */
+const BITE_DURATION = 0.46;
+const BITE_CONTACT = 0.6;
 const FIXED_STEP = 1 / 60;
 /**
  * Catch-up ceiling. Eight steps lets a machine running at 10 FPS still advance
@@ -103,6 +120,7 @@ export class CatscapadesGame {
   private readonly scratchVector = new THREE.Vector3();
   private readonly scratchVectorB = new THREE.Vector3();
   private readonly ownerMeasure = new THREE.Vector3();
+  private readonly scratchQuaternion = new THREE.Quaternion();
   private readonly lookTarget = new THREE.Vector3();
   private readonly catFocus = new THREE.Vector3();
 
@@ -144,6 +162,11 @@ export class CatscapadesGame {
   private suspicion = 0;
 
   private carrying: LiveProp | null = null;
+  /**
+   * 0 at the moment of the bite, 1 once the object has settled into the mouth.
+   * Carried props ease onto the socket rather than teleporting there.
+   */
+  private carryAttach = 1;
   private sinkRunning = false;
   private sinkTimer = 0;
   private cupboardOpen = false;
@@ -153,6 +176,21 @@ export class CatscapadesGame {
   private caughtCount = 0;
 
   private swipeTimer = 0;
+  private swipeDuration = SWIPE_DURATION;
+  private swipeSide: -1 | 1 = -1;
+  private swipeResistance = 0;
+  private readonly swipeAim = new THREE.Vector3();
+  private swipeAiming = false;
+  private biteTimer = 0;
+  private readonly biteAim = new THREE.Vector3();
+  private biteAiming = false;
+  /**
+   * The interaction the cat has committed to, resolved when the animation
+   * reaches the frame that would actually make contact. Resolving on the
+   * button press instead is what made swipes and pickups look like the world
+   * reacting before the cat touched it.
+   */
+  private pending: PendingAction | null = null;
   private meowTimer = 0;
   private caughtCooldown = 0;
   private innocenceWeight = 0;
@@ -369,6 +407,11 @@ export class CatscapadesGame {
   private fixedUpdate(dt: number, input: InputFrame): void {
     this.elapsed += dt;
     this.swipeTimer = Math.max(0, this.swipeTimer - dt);
+    if (this.swipeTimer <= 0) this.swipeAiming = false;
+    this.biteTimer = Math.max(0, this.biteTimer - dt);
+    if (this.biteTimer <= 0) this.biteAiming = false;
+    this.carryAttach = Math.min(1, this.carryAttach + dt * 8);
+    this.advancePendingAction(dt);
     this.meowTimer = Math.max(0, this.meowTimer - dt);
     this.caughtCooldown = Math.max(0, this.caughtCooldown - dt);
     this.toastTimer = Math.max(0, this.toastTimer - dt);
@@ -515,6 +558,14 @@ export class CatscapadesGame {
     return true;
   }
 
+  /**
+   * Commits the cat to an interaction and lets the animation deliver it.
+   *
+   * Nothing lands here except a drop: the force, the pickup, and the tap being
+   * turned on all happen when the paw or the mouth actually arrives, which is
+   * the difference between an object reacting to a cat and an object reacting
+   * to a button.
+   */
   private performInteraction(id: string): void {
     const [kind, key = ""] = id.split(":");
 
@@ -525,23 +576,78 @@ export class CatscapadesGame {
     if (kind === "carry") {
       const prop = this.props.find((candidate) => candidate.spec.id === key);
       if (!prop) return;
-      this.carrying = prop;
-      prop.body.setCarried(true);
-      this.audio.meow();
-      if (key === "key") this.completeObjective("key", "The key is yours. The counter was no obstacle.");
-      this.showToast(`Carrying ${prop.spec.label}.`);
+      prop.body.position(this.biteAim);
+      this.biteAiming = true;
+      this.biteTimer = BITE_DURATION;
+      this.pending = { kind: "carry", key, remaining: BITE_DURATION * BITE_CONTACT };
       return;
     }
     if (kind === "swipe") {
-      this.swipeTimer = 0.42;
       const prop = this.props.find((candidate) => candidate.spec.id === key);
-      if (prop) this.swipeProp(prop);
+      if (!prop) return;
+      // A heavier object earns a slower, more deliberate strike.
+      this.swipeResistance = smoothstep(0.05, 0.6, prop.mass);
+      this.swipeDuration = SWIPE_DURATION + this.swipeResistance * 0.16;
+      prop.body.position(this.swipeAim);
+      this.aimSwipe(this.swipeAim);
+      this.swipeTimer = this.swipeDuration;
+      this.pending = { kind: "swipe", key, remaining: this.swipeDuration * SWIPE_CONTACT };
       return;
     }
     if (kind === "station") {
-      this.swipeTimer = 0.42;
-      this.activateStation(key);
+      const station = STATIONS.find((candidate) => candidate.id === key);
+      this.swipeResistance = 0.35;
+      this.swipeDuration = SWIPE_DURATION;
+      if (station) {
+        this.aimSwipe(this.swipeAim.set(
+          station.position[0], station.position[1], station.position[2],
+        ));
+      } else {
+        this.swipeAiming = false;
+      }
+      this.swipeTimer = this.swipeDuration;
+      this.pending = { kind: "station", key, remaining: this.swipeDuration * SWIPE_CONTACT };
     }
+  }
+
+  /** Points the strike at `target` and picks the paw nearer to it. */
+  private aimSwipe(target: THREE.Vector3): void {
+    this.swipeAiming = true;
+    const facing = this.catState?.facing ?? 0;
+    const position = this.catPosition();
+    // Which side of the cat's own spine the target is on.
+    const dx = target.x - position.x;
+    const dz = target.z - position.z;
+    const lateral = dx * Math.cos(facing) - dz * Math.sin(facing);
+    this.swipeSide = lateral >= 0 ? 1 : -1;
+  }
+
+  /** Advances the committed interaction and resolves it at the contact frame. */
+  private advancePendingAction(dt: number): void {
+    const pending = this.pending;
+    if (!pending) return;
+    pending.remaining -= dt;
+    if (pending.remaining > 0) return;
+    this.pending = null;
+
+    if (pending.kind === "station") {
+      this.activateStation(pending.key);
+      return;
+    }
+    const prop = this.props.find((candidate) => candidate.spec.id === pending.key);
+    if (!prop || prop.broken) return;
+    if (pending.kind === "swipe") {
+      this.swipeProp(prop);
+      return;
+    }
+    this.carrying = prop;
+    prop.body.setCarried(true);
+    this.carryAttach = 0;
+    this.audio.meow();
+    if (pending.key === "key") {
+      this.completeObjective("key", "The key is yours. The counter was no obstacle.");
+    }
+    this.showToast(`Carrying ${prop.spec.label}.`);
   }
 
   private activateStation(id: string): void {
@@ -583,12 +689,10 @@ export class CatscapadesGame {
       const facing = this.catState?.facing ?? 0;
       away.set(Math.sin(facing), 0, Math.cos(facing));
     }
-    // Impulse is scaled by mass so every prop leaves the paw at a similar
-    // speed: a swipe is a flick of the wrist, not a fixed quantity of force.
-    const launch = prop.spec.fragile ? 2.9 : 2.3;
+    const launch = swipeLaunchSpeed(prop.mass, prop.spec.fragile);
     away.normalize().multiplyScalar(prop.mass * launch);
-    away.y = prop.mass * 1.6;
-    prop.body.applyImpulse(away, prop.mass * 0.5);
+    away.y = prop.mass * launch * 0.55;
+    prop.body.applyImpulse(away, prop.mass * launch * 0.22);
     this.audio.crash();
     this.emitStimulus(this.scratchVector, 1.1, "swipe");
   }
@@ -1056,10 +1160,14 @@ export class CatscapadesGame {
       this.carrying = null;
       prop.body.setCarried(false);
       prop.body.teleport(prop.body.spawn);
+      this.carryAttach = 1;
     }
     this.controller.teleport(this.scratchVector.set(SPAWN.cat.x, SPAWN.cat.y, SPAWN.cat.z));
     this.catAnimator.resetSecondaryMotion();
     this.catTravel = 0;
+    this.pending = null;
+    this.swipeTimer = 0;
+    this.biteTimer = 0;
     this.ownerState = "returning";
     this.ownerDwell = 0;
     // The cat is back in the garden; nothing the homeowner remembers seeing is
@@ -1109,7 +1217,12 @@ export class CatscapadesGame {
     animation.jumpProgress = state.jumpProgress;
     animation.landImpact = state.landImpact;
     animation.landRecover = state.landRecover;
-    animation.swipe = this.swipeTimer > 0 ? 1 - this.swipeTimer / 0.42 : 0;
+    animation.swipe = this.swipeTimer > 0 ? 1 - this.swipeTimer / this.swipeDuration : 0;
+    animation.swipeSide = this.swipeSide;
+    animation.swipeAim = this.swipeAiming ? this.swipeAim : null;
+    animation.swipeResistance = this.swipeResistance;
+    animation.bite = this.biteTimer > 0 ? 1 - this.biteTimer / BITE_DURATION : 0;
+    animation.biteAim = this.biteAiming ? this.biteAim : null;
     animation.meow = this.meowTimer > 0 ? Math.sin((1 - this.meowTimer / 0.9) * Math.PI) : 0;
     animation.carrying = this.carrying !== null;
     animation.sleeping = this.innocenceWeight;
@@ -1136,11 +1249,16 @@ export class CatscapadesGame {
     });
     this.ownerTravel = 0;
 
-    // Carried props ride the mouth socket rather than being re-simulated.
+    // Carried props ride the mouth socket rather than being re-simulated, but
+    // they *arrive* over a moment: snapping them there on the frame of the
+    // bite undoes the point of animating the bite at all.
     if (this.carrying) {
       this.cat.mouthAnchor.updateWorldMatrix(true, false);
-      this.cat.mouthAnchor.getWorldPosition(this.carrying.object.position);
-      this.cat.mouthAnchor.getWorldQuaternion(this.carrying.object.quaternion);
+      this.cat.mouthAnchor.getWorldPosition(this.scratchVector);
+      this.cat.mouthAnchor.getWorldQuaternion(this.scratchQuaternion);
+      const settle = smoothstep(0, 1, this.carryAttach);
+      this.carrying.object.position.lerp(this.scratchVector, settle);
+      this.carrying.object.quaternion.slerp(this.scratchQuaternion, settle);
     }
   }
 

@@ -217,6 +217,32 @@ instead of exposing capsule seams. Consequences:
   stiffness to "fix" a floppy tail removes the lag that makes it read as real
   weight — change `carriage` instead.
 
+## Interactions
+
+An interaction is a committed animation with a contact frame, not an instant
+effect. `CatscapadesGame.performInteraction` only *commits*; the force, the
+pickup, and the tap being turned on all land when `advancePendingAction`
+reaches the frame the paw or the mouth actually arrives.
+
+| Input | Meaning |
+| --- | --- |
+| `swipe` | 0→1 through a strike. Contact is at `SWIPE_CONTACT` (0.48), the peak of the reach. |
+| `swipeSide` | which forepaw strikes, chosen from which side of the spine the target is on |
+| `swipeAim` | world point the paw reaches for, clamped to what the limb can reach — an unreachable target straightens the leg into a stiff poke |
+| `swipeResistance` | 0 for a felt mouse, 1 for a full kettle. Past contact it checks the paw and shoves the shoulder back instead of following through. |
+| `bite` | 0→1 through a mouth pickup; the jaw closes at `BITE_CONTACT` (0.6), which is the frame the game attaches the object |
+| `biteAim` | world point the head reaches down to |
+
+Two rules the effect depends on:
+
+- **The launch speed falls off with mass** (`swipeLaunchSpeed` in
+  `src/core/gameplay.ts`). Scaling the impulse *by* mass — as the game used to —
+  launches everything at the same speed, so a kettle and a felt mouse behave
+  identically. Clamped at both ends so nothing leaves the level and nothing
+  refuses to move.
+- **Carried props ease onto the mouth socket** over `carryAttach`. Snapping them
+  there on the frame of the bite undoes the point of animating the bite.
+
 ## Adding a clip
 
 Clips live in `CAT_CLIPS` in `src/models/registry.ts`. A clip is a partial
