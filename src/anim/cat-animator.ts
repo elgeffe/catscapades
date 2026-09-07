@@ -41,6 +41,12 @@ export interface CatAnimationInput {
    * review clips leave it `null` and run on a treadmill.
    */
   travel: number | null;
+  /**
+   * How hard the cat is arresting its momentum, 0..1. Drives the brace: fore
+   * paws planted out in front, hocks gathered under, weight back, feet held
+   * low and scrubbing rather than lifting.
+   */
+  brake: number;
   /** Crouched, deliberate movement. */
   stalking: boolean;
   /** 0 grounded, 1 fully airborne. */
@@ -70,6 +76,7 @@ export const NEUTRAL_CAT_ANIMATION: CatAnimationInput = {
   turnRate: 0,
   acceleration: 0,
   travel: null,
+  brake: 0,
   stalking: false,
   airborne: 0,
   jumpProgress: 0,
@@ -157,9 +164,13 @@ const GAIT_HYSTERESIS = 0.45;
 /**
  * Effective radius a paw swings through when the cat yaws. Turning contributes
  * this much arc length per radian to the stride odometer, which is what turns a
- * standing pivot into visible steps instead of a silent body spin.
+ * standing pivot into visible steps instead of a silent body spin. It is set
+ * well above the geometric paw radius (~0.24) deliberately: on a pivot all four
+ * feet have to be repositioned rather than one pair passing the other, so the
+ * geometric value leaves each paw holding through ~50 degrees of yaw and the
+ * cat ends up doing the splits.
  */
-const PIVOT_STEP_RADIUS = 0.3;
+const PIVOT_STEP_RADIUS = 0.55;
 /**
  * Ignore a single frame's travel beyond this. A stalled frame can legitimately
  * carry eight fixed steps of a scampering cat; a teleport carries metres.
@@ -212,6 +223,7 @@ export class CatAnimator {
   private sitWeight = 0;
   private sleepWeight = 0;
   private carryWeight = 0;
+  private braceWeight = 0;
   private breath = 0;
   private blinkTimer = 1.6;
   private blink = 0;
@@ -391,6 +403,7 @@ export class CatAnimator {
     this.sitWeight = damp(this.sitWeight, input.sitting, 6, dt);
     this.sleepWeight = damp(this.sleepWeight, input.sleeping, 3.2, dt);
     this.carryWeight = damp(this.carryWeight, input.carrying ? 1 : 0, 7, dt);
+    this.braceWeight = damp(this.braceWeight, clamp(input.brake, 0, 1), 11, dt);
     this.earAlert = damp(this.earAlert, input.alert, 7, dt);
     this.breath += dt * (this.sleepWeight > 0.5 ? 1.5 : 2.4 + this.smoothedSpeed * 0.35);
   }
@@ -410,6 +423,9 @@ export class CatAnimator {
     const landCrouch = -input.landImpact * 0.11;
     const idleBreath = Math.sin(this.breath) * 0.004 * (1 - motion);
 
+    // A braking cat drops its hindquarters and gets its weight behind the
+    // stopping forepaws, rather than gliding to a halt at ride height.
+    const braceDrop = -this.braceWeight * 0.026;
     const rideScale = lerp(1, gait.crouch, this.crouchWeight * 0.85 + (gait.name === "creep" ? 0.15 : 0));
     // A sit lowers the haunches while the pitched body and flexed spine keep
     // the chest upright. A loaf settles the sternum almost onto the floor;
@@ -418,7 +434,7 @@ export class CatAnimator {
     const sleepDrop = -this.sleepWeight * 0.17;
 
     const height = this.rig.standHeight * rideScale + bob + gallopDrop + airborneLift
-      + landCrouch + idleBreath + sitLift + sleepDrop;
+      + landCrouch + idleBreath + sitLift + sleepDrop + braceDrop;
     this.bodyLift = damp(this.bodyLift, height, 22, dt);
     this.rig.body.position.y = this.bodyLift;
 
@@ -427,7 +443,7 @@ export class CatAnimator {
     const flightPitch = input.airborne * lerp(-0.18, 0.16, clamp(input.jumpProgress, 0, 1));
     const landPitch = input.landImpact * 0.22;
     const restPitch = -this.sitWeight * 0.24 + this.sleepWeight * 0.018;
-    const targetPitch = accelPitch + flightPitch + landPitch + restPitch
+    const targetPitch = accelPitch + flightPitch + landPitch + restPitch + this.braceWeight * 0.06
       + Math.sin(this.cycle * Math.PI * 2) * gait.flex * 0.35 * motion;
     this.bodyPitch = damp(this.bodyPitch, targetPitch, 14, dt);
     this.rig.body.rotation.x = this.bodyPitch;
@@ -466,7 +482,7 @@ export class CatAnimator {
       + smoothstep(0.72, 1, jump) * 0.15
     );
     const target = arch + flightArch + this.crouchWeight * 0.1
-      - this.sitWeight * 0.34 + this.sleepWeight * 0.08;
+      - this.sitWeight * 0.34 + this.sleepWeight * 0.08 - this.braceWeight * 0.13;
     this.spineFlex = damp(this.spineFlex, target, 15, dt);
     this.rig.spineLower.rotation.x = this.spineFlex * 0.55;
     this.rig.spineUpper.rotation.x = this.spineFlex * 0.45;
@@ -496,7 +512,12 @@ export class CatAnimator {
     // instead of freezing mid-step; any real stepping rate is fully gaited,
     // including a pivot that covers no ground at all.
     const gaitWeight = smoothstep(0.04, 0.35, this.strideActivity);
-    const lift = gait.lift * gaitWeight;
+    // Braking scrubs: the paws stay low and hold the floor instead of lifting
+    // clear. Stepping round a hard turn does the opposite on the outside legs.
+    const brace = this.braceWeight * gaitWeight;
+    const turnStep = smoothstep(1, 4, Math.abs(this.smoothedTurn)) * gaitWeight;
+    const turnSign = Math.sign(this.smoothedTurn);
+    const lift = gait.lift * gaitWeight * (1 - brace * 0.45);
     /** Ground the body covers while one paw is planted, early landing included. */
     const stanceSpan = gait.stride * (gait.duty + (1 - gait.duty) * (1 - SWING_LAND));
     /** Ground covered while a paw is travelling to its next print. */
@@ -524,12 +545,25 @@ export class CatAnimator {
 
       // Where this paw wants to land: half a stance span ahead of its rest
       // target, so the body passes over the print rather than dragging it back.
+      // Which side of the turn this leg is on: +1 outside, -1 inside.
+      const outside = leg.side * turnSign;
       const printX = leg.restTarget.x
         // Inside legs shorten and outside legs reach while turning.
-        + this.smoothedTurn * 0.014 * leg.side * (leg.isFront ? 1.2 : 0.8);
+        + this.smoothedTurn * 0.014 * leg.side * (leg.isFront ? 1.2 : 0.8)
+        // A deliberate turning step: the outside paws are placed wide and the
+        // inside paws gather, so the cat steps round its own axis instead of
+        // being rotated on the spot.
+        + turnStep * 0.03 * outside * (leg.isFront ? 1 : 0.7)
+        // Braking widens the front track for a stable stop.
+        + (leg.isFront ? brace * 0.022 * leg.side : 0);
       const printZ = leg.restTarget.z + stanceSpan * 0.5 * gaitWeight
         // Front paws reach further at speed, hind legs tuck under the belly.
-        + (leg.isFront ? gaitWeight * 0.03 : -this.crouchWeight * 0.04);
+        + (leg.isFront ? gaitWeight * 0.03 : -this.crouchWeight * 0.04)
+        // The outside foreleg reaches around the corner; the inside one is
+        // pulled back out of the way of the pivot.
+        + turnStep * 0.045 * outside * (leg.isFront ? 1 : -0.4)
+        // The brace: forepaws stop the cat out in front, hocks gather under it.
+        + (leg.isFront ? brace * 0.07 : -brace * 0.05);
 
       contact.planted = false;
       if (airborne > 0.5) {
@@ -577,7 +611,8 @@ export class CatAnimator {
         const eased = swingT * swingT * (3 - 2 * swingT);
         x = lerp(contact.x, printX, eased);
         z = lerp(contact.z, printZ + remaining, eased);
-        liftArc = Math.sin(Math.pow(swingT, 0.85) * Math.PI) * lift;
+        liftArc = Math.sin(Math.pow(swingT, 0.85) * Math.PI) * lift
+          * (1 + turnStep * 0.55 * Math.max(0, outside));
         curl = Math.sin(swingT * Math.PI) * 0.36;
       }
 

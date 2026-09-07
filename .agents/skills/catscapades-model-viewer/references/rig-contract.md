@@ -154,6 +154,24 @@ because both come from the same odometer. Consequences:
 `footPlanted(index)` is true on the frame a leg takes the ground, for footfall
 audio; `strideRate()` reports the odometer clock for the debug overlay.
 
+## Braking and turning
+
+`CatController` decides the two, and `CatAnimator` shows them:
+
+- `CatFrameState.brake` is intent, not deceleration. It rises when the stick
+  opposes travel or is released at speed; the controller's stop stays crisp
+  because a stealth game needs precise placement. The animator braces on it —
+  fore prints forward, hocks gathered, front track widened, swing lift cut so
+  the paws scrub, body dropped and pitched over the stopping forepaws.
+- Facing turns towards the **stick**, not towards current travel, and travel
+  commits to the spine as speed builds (`commit`, 1.1→3.4 u/s). Speed is cut by
+  up to 74% while the body is still swinging round. Without that the stick can
+  reverse the velocity while the body lags, and the cat slides backwards facing
+  forwards — sliding that ground contacts alone cannot fix.
+- `turnStep` places the outside paws wide and forward and gathers the inside
+  ones, and raises the outside swing arc, so the cat steps round its own axis.
+  Outside is `leg.side * sign(smoothedTurn)`.
+
 ## Tail
 
 `updateTail` simulates the chain in **world space** using fixed 120 Hz verlet

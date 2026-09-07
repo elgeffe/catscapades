@@ -157,6 +157,71 @@ describe("cat stride grounding", () => {
     }
   });
 
+  it("plants the forepaws out in front to brake, and holds them low", () => {
+    const rig = buildCat();
+    const animator = new CatAnimator(rig);
+    const front = rig.legs.filter((leg) => leg.isFront);
+    const hind = rig.legs.filter((leg) => !leg.isFront);
+    // A contact recedes across its whole stance, so a single frame catches an
+    // arbitrary point in the sweep. Sample the extremes over several cycles,
+    // and measure the fore-to-hind span rather than one paw: that is the
+    // silhouette change a player reads as "throwing the anchors out".
+    const sample = (state: CatAnimationInput, frames: number) => {
+      let reach = -Infinity;
+      let gather = -Infinity;
+      let lift = 0;
+      for (let frame = 0; frame < frames; frame += 1) {
+        animator.update(STEP, state);
+        rig.root.updateMatrixWorld(true);
+        for (const leg of front) {
+          const paw = leg.paw.getWorldPosition(new THREE.Vector3());
+          reach = Math.max(reach, paw.z);
+          lift = Math.max(lift, paw.y);
+        }
+        for (const leg of hind) {
+          gather = Math.max(gather, leg.paw.getWorldPosition(new THREE.Vector3()).z);
+        }
+      }
+      return { span: reach - gather, lift };
+    };
+    const running: CatAnimationInput = { ...NEUTRAL_CAT_ANIMATION, speed: 5.2, travel: 5.2 * STEP };
+    const braking: CatAnimationInput = { ...running, brake: 1, acceleration: -14 };
+
+    sample(running, 150);
+    const cruising = sample(running, 60);
+    sample(braking, 60);
+    const braced = sample(braking, 60);
+
+    expect(braced.span).toBeGreaterThan(cruising.span + 0.05);
+    expect(braced.lift).toBeLessThan(cruising.lift);
+    // The forequarters go down over the stopping paws while the hocks gather:
+    // a skid, not a glide. Positive body pitch is nose-down.
+    expect(rig.body.rotation.x).toBeGreaterThan(0.1);
+    expect(rig.body.position.y).toBeLessThan(rig.standHeight);
+  });
+
+  it("steps wide on the outside of a hard turn", () => {
+    const turning = walk(240, { speed: 3.2, turnRate: 3 });
+    const { rig } = turning;
+    rig.root.updateMatrixWorld(true);
+    // Positive yaw puts the left legs on the outside of the arc, so they should
+    // be tracking wider of the spine than their mirror on the inside.
+    const track = new Map<string, number>();
+    for (const leg of rig.legs) {
+      const local = rig.root.worldToLocal(leg.paw.getWorldPosition(new THREE.Vector3()));
+      track.set(leg.id, Math.abs(local.x));
+    }
+    const straight = walk(240, { speed: 3.2 });
+    straight.rig.root.updateMatrixWorld(true);
+    const neutral = new Map<string, number>();
+    for (const leg of straight.rig.legs) {
+      const local = straight.rig.root.worldToLocal(leg.paw.getWorldPosition(new THREE.Vector3()));
+      neutral.set(leg.id, Math.abs(local.x));
+    }
+    expect(track.get("front-left")!).toBeGreaterThan(neutral.get("front-left")!);
+    expect(track.get("hind-left")!).toBeGreaterThan(neutral.get("hind-left")!);
+  });
+
   it("runs on a treadmill when travel is not measured", () => {
     // Review clips leave `travel` null: the legs must still cycle so the model
     // viewer and the clip inspector have something to look at.

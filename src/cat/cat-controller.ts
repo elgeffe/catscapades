@@ -2,7 +2,7 @@ import * as THREE from "three";
 import type { CharacterBody, PhysicsWorld } from "../physics/physics-world";
 import { WORLD_GRAVITY } from "../physics/physics-world";
 import { JUMP_TARGETS, type JumpTargetSpec } from "../level/level-data";
-import { clamp, dampAngle, shortestAngle } from "../core/math";
+import { clamp, damp, dampAngle, shortestAngle, smoothstep } from "../core/math";
 
 /**
  * Kinematic cat locomotion.
@@ -65,6 +65,13 @@ export interface CatFrameState {
   readonly facing: number;
   readonly turnRate: number;
   readonly acceleration: number;
+  /**
+   * How hard the cat is arresting its own momentum, 0..1. Rises when the stick
+   * opposes travel or is released at speed. Animation braces on this; it does
+   * not change how quickly the controller actually stops, because a stealth
+   * game needs the stop to stay crisp.
+   */
+  readonly brake: number;
   readonly grounded: boolean;
   readonly airborne: number;
   readonly jumpProgress: number;
@@ -82,7 +89,11 @@ export class CatController {
   private readonly previousPosition = new THREE.Vector3();
 
   private facing = 0;
+  /** Where the stick is pointing. The cat turns to it; travel follows the body. */
+  private desiredFacing = 0;
   private turnRate = 0;
+  private brake = 0;
+  private readonly travelDirection = new THREE.Vector3();
   private acceleration = 0;
   private previousSpeed = 0;
   private grounded = true;
@@ -127,6 +138,8 @@ export class CatController {
     this.arcDuration = 0;
     this.committedTarget = null;
     this.airborneBlend = 0;
+    this.brake = 0;
+    this.desiredFacing = this.facing;
     this.body.setFeetPosition(to);
   }
 
@@ -151,7 +164,7 @@ export class CatController {
     this.position.copy(result.position);
 
     this.reconcile(dt, result.grounded, result.translation.y);
-    this.updateFacing(dt);
+    this.updateFacing(dt, input.moveX !== 0 || input.moveY !== 0);
 
     const planarSpeed = Math.hypot(this.velocity.x, this.velocity.z);
     this.acceleration = (planarSpeed - this.previousSpeed) / Math.max(dt, 1e-4);
@@ -165,6 +178,7 @@ export class CatController {
       facing: this.facing,
       turnRate: this.turnRate,
       acceleration: this.acceleration,
+      brake: this.brake,
       grounded: this.grounded,
       airborne: this.airborneBlend,
       jumpProgress: this.jumpProgress(),
@@ -181,14 +195,48 @@ export class CatController {
     if (magnitude > 0.001) this.moveDirection.normalize();
 
     const base = input.stalk ? CAT_SPEEDS.stalk : input.run ? CAT_SPEEDS.scamper : CAT_SPEEDS.walk;
-    const speed = base * (input.carrying ? CAT_SPEEDS.carryFactor : 1) * magnitude;
+    let speed = base * (input.carrying ? CAT_SPEEDS.carryFactor : 1) * magnitude;
 
     if (this.grounded) {
+      const planarSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+      if (magnitude > 0.001) this.desiredFacing = Math.atan2(this.moveDirection.x, this.moveDirection.z);
+
+      // A cat does not carry speed through a sharp turn: it plants, pivots, and
+      // then goes. Without this the stick can reverse the velocity while the
+      // body is still swinging round, and the cat slides backwards facing
+      // forwards — the "separate body rotation" that reads as sliding even once
+      // the paws themselves are planted correctly.
+      const misalignment = magnitude > 0.001
+        ? Math.abs(shortestAngle(this.facing, this.desiredFacing))
+        : 0;
+      speed *= 1 - smoothstep(0.55, 2.3, misalignment) * 0.74;
+
+      // Travel commits to the spine as speed builds. Slow enough to place a paw
+      // deliberately, the cat may still sidestep; at a scamper it must arc.
+      const commit = smoothstep(1.1, 3.4, planarSpeed);
+      this.travelDirection
+        .set(Math.sin(this.facing), 0, Math.cos(this.facing))
+        .multiplyScalar(commit)
+        .addScaledVector(this.moveDirection, 1 - commit);
+      if (this.travelDirection.lengthSq() > 1e-6) this.travelDirection.normalize();
+      else this.travelDirection.copy(this.moveDirection);
+
+      // Braking is an intent signal for animation, not a slower stop: opposing
+      // the stick, or letting go at speed, braces the cat.
+      const heading = planarSpeed > 0.05
+        ? (this.velocity.x * this.travelDirection.x + this.velocity.z * this.travelDirection.z) / planarSpeed
+        : 1;
+      const opposition = magnitude > 0.001 ? clamp(-heading, 0, 1) : 1;
+      const arresting = Math.max(opposition, smoothstep(0.8, 2.6, misalignment));
+      this.brake = damp(this.brake, arresting * smoothstep(0.7, 3, planarSpeed), 13, dt);
+
       const alpha = 1 - Math.exp(-(magnitude > 0 ? 18 : 24) * dt);
-      this.velocity.x += (this.moveDirection.x * speed - this.velocity.x) * alpha;
-      this.velocity.z += (this.moveDirection.z * speed - this.velocity.z) * alpha;
+      this.velocity.x += (this.travelDirection.x * speed - this.velocity.x) * alpha;
+      this.velocity.z += (this.travelDirection.z * speed - this.velocity.z) * alpha;
       return;
     }
+
+    this.brake = damp(this.brake, 0, 8, dt);
 
     // Airborne: a leap keeps its launch momentum. Steering nudges the arc but
     // must never damp it, or a solved jump loses the speed it needs to reach
@@ -276,6 +324,8 @@ export class CatController {
     this.jumpStartY = this.arcStart.y;
     this.jumpPeakY = Math.max(this.arcStart.y, y) + this.arcHeight;
     this.facing = Math.atan2(x - this.arcStart.x, z - this.arcStart.z);
+    this.desiredFacing = this.facing;
+    this.brake = 0;
   }
 
   /** Drives the committed arc. Returns the frame state directly. */
@@ -316,6 +366,7 @@ export class CatController {
       facing: this.facing,
       turnRate: 0,
       acceleration: 0,
+      brake: 0,
       grounded: this.grounded,
       airborne: this.airborneBlend,
       jumpProgress: u,
@@ -385,10 +436,14 @@ export class CatController {
     this.airborneBlend += (target - this.airborneBlend) * (1 - Math.exp(-14 * dt));
   }
 
-  private updateFacing(dt: number): void {
+  private updateFacing(dt: number, steering: boolean): void {
     const planarSpeed = Math.hypot(this.velocity.x, this.velocity.z);
-    if (planarSpeed > 0.2) {
-      const targetAngle = Math.atan2(this.velocity.x, this.velocity.z);
+    // Turn towards where the stick points, not towards where the cat is already
+    // travelling: a cat aims its body first and the feet follow. Held still,
+    // that becomes a pivot on the spot, which the stride odometer pays for in
+    // steps rather than spinning the body over planted paws.
+    if (steering || planarSpeed > 0.2) {
+      const targetAngle = steering ? this.desiredFacing : Math.atan2(this.velocity.x, this.velocity.z);
       const previous = this.facing;
       // Cats turn faster at low speed and lean through fast direction changes.
       const agility = this.grounded ? 15 - Math.min(8, planarSpeed) : 5;

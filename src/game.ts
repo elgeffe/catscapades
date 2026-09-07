@@ -897,6 +897,7 @@ export class CatscapadesGame {
     // every step's travel since the last frame rather than only the last one's.
     animation.travel = this.catTravel;
     this.catTravel = 0;
+    animation.brake = state.brake;
     animation.stalking = !this.completed && this.stalkRequested;
     animation.airborne = state.airborne;
     animation.jumpProgress = state.jumpProgress;

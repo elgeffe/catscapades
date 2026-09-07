@@ -79,6 +79,21 @@ const CAT_CLIPS: Readonly<Record<string, CatClipState>> = {
     input: { speed: 2.4 },
     at: (time, input) => { input.turnRate = Math.sin(time * 1.6) * 3.4; },
   },
+  pivot: {
+    input: { speed: 0, alert: 0.5 },
+    at: (time, input) => { input.turnRate = Math.sin(time * 0.7) * 2.6; },
+  },
+  brake: {
+    input: {},
+    at: (time, input) => {
+      // Scamper, then throw the anchors out, repeatedly.
+      const cycle = (time % 2.4) / 2.4;
+      const stopping = cycle > 0.55;
+      input.speed = stopping ? Math.max(0, 5.2 - (cycle - 0.55) * 18) : 5.2;
+      input.acceleration = stopping ? -14 : 6;
+      input.brake = stopping ? 1 : 0;
+    },
+  },
   jump: {
     input: {},
     at: (time, input) => {
