@@ -86,6 +86,8 @@ export class CatscapadesGame {
   private readonly preparations = new Set<string>();
 
   private readonly catAnimation: CatAnimationInput = { ...NEUTRAL_CAT_ANIMATION };
+  /** Ground covered since the last rendered frame, for the stride odometer. */
+  private catTravel = 0;
   private catState: CatFrameState | null = null;
   private readonly ownerPosition = new THREE.Vector3();
   private readonly ownerTarget = new THREE.Vector3();
@@ -245,6 +247,7 @@ export class CatscapadesGame {
   debugTeleport(x: number, z: number, y = 1.2): void {
     this.controller.teleport(this.scratchVector.set(x, y, z));
     this.catAnimator.resetSecondaryMotion();
+    this.catTravel = 0;
     this.director.updateZone(x, z);
   }
 
@@ -352,6 +355,8 @@ export class CatscapadesGame {
       this.director.forward(this.scratchVector),
       this.director.right(this.scratchVectorB),
     );
+
+    this.catTravel += this.catState.travel;
 
     this.updateOwner(dt);
     this.physics.step();
@@ -853,6 +858,7 @@ export class CatscapadesGame {
     }
     this.controller.teleport(this.scratchVector.set(SPAWN.cat.x, SPAWN.cat.y, SPAWN.cat.z));
     this.catAnimator.resetSecondaryMotion();
+    this.catTravel = 0;
     this.ownerState = "returning";
     this.ownerDwell = 0;
     this.suspicion = 30;
@@ -885,6 +891,12 @@ export class CatscapadesGame {
     animation.speed = state.planarSpeed;
     animation.turnRate = state.turnRate;
     animation.acceleration = state.acceleration;
+    // Strides are timed from ground actually covered, so a cat held against a
+    // cupboard stops stepping instead of skating on the spot. The controller
+    // runs on a fixed step and animation once per rendered frame, so hand over
+    // every step's travel since the last frame rather than only the last one's.
+    animation.travel = this.catTravel;
+    this.catTravel = 0;
     animation.stalking = !this.completed && this.stalkRequested;
     animation.airborne = state.airborne;
     animation.jumpProgress = state.jumpProgress;
@@ -1003,7 +1015,8 @@ export class CatscapadesGame {
       `Triangles    ${this.renderer.info.render.triangles}`,
       `Cat          ${state ? `${state.position.x.toFixed(2)}, ${state.position.y.toFixed(2)}, ${state.position.z.toFixed(2)}` : "—"}`,
       `Grounded     ${state?.grounded ?? false}  air ${(state?.airborne ?? 0).toFixed(2)}`,
-      `Gait         ${this.catAnimator.currentGait()}  speed ${(state?.planarSpeed ?? 0).toFixed(2)}`,
+      `Gait         ${this.catAnimator.currentGait()}  speed ${(state?.planarSpeed ?? 0).toFixed(2)}`
+      + `  stride/s ${this.catAnimator.strideRate().toFixed(2)}`,
       `Jump target  ${this.controller.availableJumpTarget()?.id ?? "—"}`,
       `Carrying     ${this.carrying?.spec.id ?? "—"}`,
       `Owner        ${this.ownerState}  suspicion ${Math.round(this.suspicion)}`,

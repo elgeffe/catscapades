@@ -55,6 +55,13 @@ export interface CatFrameState {
   readonly position: THREE.Vector3;
   readonly velocity: THREE.Vector3;
   readonly planarSpeed: number;
+  /**
+   * Planar ground distance actually covered this frame, after Rapier resolved
+   * collisions. Animation times its strides from this rather than from
+   * `planarSpeed`, so a cat pressed against a cupboard stops stepping instead
+   * of running on the spot.
+   */
+  readonly travel: number;
   readonly facing: number;
   readonly turnRate: number;
   readonly acceleration: number;
@@ -154,6 +161,7 @@ export class CatController {
       position: this.position,
       velocity: this.velocity,
       planarSpeed,
+      travel: this.measureTravel(),
       facing: this.facing,
       turnRate: this.turnRate,
       acceleration: this.acceleration,
@@ -304,6 +312,7 @@ export class CatController {
       position: this.position,
       velocity: this.velocity,
       planarSpeed: 0,
+      travel: this.measureTravel(),
       facing: this.facing,
       turnRate: 0,
       acceleration: 0,
@@ -388,6 +397,14 @@ export class CatController {
     } else {
       this.turnRate += (0 - this.turnRate) * (1 - Math.exp(-8 * dt));
     }
+  }
+
+  /** Planar distance between the previous and current resolved positions. */
+  private measureTravel(): number {
+    return Math.hypot(
+      this.position.x - this.previousPosition.x,
+      this.position.z - this.previousPosition.z,
+    );
   }
 
   private jumpProgress(): number {

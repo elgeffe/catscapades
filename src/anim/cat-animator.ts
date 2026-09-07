@@ -11,6 +11,18 @@ import { clamp, damp, lerp, lerpPhase, shortestAngle, smoothstep, wobble } from 
  * stabilised against body bob before looking at points of interest, and the
  * tail is a verlet chain that lags behind the pelvis. The result reads as a
  * real cat because the same causes drive it: momentum, footfall, and attention.
+ *
+ * Two rules keep the cat on the floor rather than skating over it:
+ *
+ *   1. The stride clock is an **odometer**, not a timer. It advances by the
+ *      ground the cat actually covered — after Rapier resolved collisions —
+ *      plus an allowance for yaw, so pushing into a wall stops the legs and
+ *      turning on the spot produces pivot steps.
+ *   2. A planted paw is stored as a **ground contact**, not as a body-space
+ *      offset. Every frame each stored contact is receded and counter-rotated
+ *      by the body's own motion, so a stance paw holds its spot on the floor
+ *      while the torso travels over it. The stance excursion is therefore
+ *      emergent rather than authored, and cannot disagree with the gait rate.
  */
 
 export type CatGaitName = "creep" | "walk" | "trot" | "gallop";
@@ -22,6 +34,13 @@ export interface CatAnimationInput {
   turnRate: number;
   /** Forward acceleration in units per second squared. */
   acceleration: number;
+  /**
+   * Planar ground distance actually covered this frame, or `null` to derive it
+   * from `speed`. The stride clock runs on this, so a cat walking into a
+   * cupboard stops stepping while its commanded speed stays high. Isolated
+   * review clips leave it `null` and run on a treadmill.
+   */
+  travel: number | null;
   /** Crouched, deliberate movement. */
   stalking: boolean;
   /** 0 grounded, 1 fully airborne. */
@@ -50,6 +69,7 @@ export const NEUTRAL_CAT_ANIMATION: CatAnimationInput = {
   speed: 0,
   turnRate: 0,
   acceleration: 0,
+  travel: null,
   stalking: false,
   airborne: 0,
   jumpProgress: 0,
@@ -134,11 +154,49 @@ const WALK_TO_TROT = 2.05;
 const TROT_TO_GALLOP = 4.3;
 const GAIT_HYSTERESIS = 0.45;
 
+/**
+ * Effective radius a paw swings through when the cat yaws. Turning contributes
+ * this much arc length per radian to the stride odometer, which is what turns a
+ * standing pivot into visible steps instead of a silent body spin.
+ */
+const PIVOT_STEP_RADIUS = 0.3;
+/**
+ * Ignore a single frame's travel beyond this. A stalled frame can legitimately
+ * carry eight fixed steps of a scampering cat; a teleport carries metres.
+ */
+const MAX_FRAME_TRAVEL = 1;
+/** Clearance held between a planted sole and the floor plane. */
+const SOLE_CLEARANCE = 0.004;
+/**
+ * Fraction of the swing phase spent travelling. The paw reaches its print a
+ * little early and takes the ground there, rather than still converging when
+ * the phase boundary arrives — which is what stops a short swing from planting
+ * with a frame of residual skid.
+ */
+const SWING_LAND = 0.86;
+
+/**
+ * A paw's ground contact, carried in body space and receded every frame by the
+ * body's own motion. While the leg is in stance this is the fixed spot on the
+ * floor the sole is standing on; through swing it is the spot the paw left,
+ * which keeps receding so the swing reads as leaving ground behind.
+ */
+interface FootContact {
+  x: number;
+  z: number;
+  /** Whether the paw was carrying weight last frame, for plant/lift edges. */
+  down: boolean;
+  /** Set on the frame the paw plants, for footfall audio. */
+  planted: boolean;
+}
+
 export class CatAnimator {
   private gait: GaitProfile = GAITS.walk;
   private readonly legPhaseOffsets: number[];
   private cycle = 0;
-  private cycleFrequency = 0;
+  private strideRateValue = 0;
+  private strideActivity = 0;
+  private readonly contacts: FootContact[];
 
   private bodyLift: number;
   private bodyPitch = 0;
@@ -169,6 +227,7 @@ export class CatAnimator {
 
   private readonly scratchWorld = new THREE.Vector3();
   private readonly scratchRootWorld = new THREE.Vector3();
+  private readonly scratchGround = new THREE.Vector3();
   private readonly scratchTarget = new THREE.Vector3();
   private readonly scratchDesired = new THREE.Vector3();
   private readonly scratchMidpoint = new THREE.Vector3();
@@ -184,6 +243,12 @@ export class CatAnimator {
     // animation frame to collapse the torso onto the floor before recovering.
     this.bodyLift = rig.standHeight;
     this.legPhaseOffsets = rig.legs.map((leg) => leg.phaseOffset);
+    this.contacts = rig.legs.map((leg) => ({
+      x: leg.restTarget.x,
+      z: leg.restTarget.z,
+      down: true,
+      planted: false,
+    }));
   }
 
   /** Current gait name, for the debug overlay. */
@@ -194,6 +259,15 @@ export class CatAnimator {
   /** Normalised gait clock, for footfall audio triggers. */
   gaitCycle(): number {
     return this.cycle;
+  }
+
+  /**
+   * Stride cycles per second on the odometer clock. Zero whenever the cat is
+   * not covering ground, however hard it is pushing — the readout the debug
+   * overlay uses to show that the legs are driven by travel, not by throttle.
+   */
+  strideRate(): number {
+    return this.strideRateValue;
   }
 
   /** True on the frame a given leg plants. Used for step sounds. */
@@ -216,10 +290,27 @@ export class CatAnimator {
     this.updateTail(dt, input);
   }
 
-  /** Re-seeds the tail simulation after a teleport so it does not whip. */
+  /** True on the frame the given leg planted. Used for step sounds. */
+  footPlanted(index: number): boolean {
+    return this.contacts[index]?.planted ?? false;
+  }
+
+  /**
+   * Re-seeds the tail simulation and the ground contacts after a teleport, so
+   * neither the tail whips across the level nor a paw tries to stay planted on
+   * a floor the cat is no longer standing on.
+   */
   resetSecondaryMotion(): void {
     this.tailInitialised = false;
     this.tailAccumulator = 0;
+    this.rig.legs.forEach((leg, index) => {
+      const contact = this.contacts[index];
+      if (!contact) return;
+      contact.x = leg.restTarget.x;
+      contact.z = leg.restTarget.z;
+      contact.down = true;
+      contact.planted = false;
+    });
   }
 
   // -- gait ------------------------------------------------------------------
@@ -253,14 +344,44 @@ export class CatAnimator {
       this.legPhaseOffsets[index] = lerpPhase(current, target, blend);
     }
 
-    const moving = this.smoothedSpeed > 0.05 && input.airborne < 0.5;
-    this.cycleFrequency = moving ? this.smoothedSpeed / this.gait.stride : 0;
-    if (moving) {
-      this.cycle = (this.cycle + this.cycleFrequency * dt) % 1;
+    // The clock is an odometer. `travel` is the distance Rapier actually let the
+    // cat cover, so walking into a cupboard advances nothing and the legs stop
+    // rather than running on the spot. Yaw contributes arc length, which is
+    // what makes a turn cost steps instead of spinning the body over still paws.
+    const grounded = 1 - clamp(input.airborne, 0, 1);
+    const measured = input.travel ?? Math.max(0, input.speed) * dt;
+    const forward = clamp(measured, 0, MAX_FRAME_TRAVEL);
+    const yawArc = Math.abs(input.turnRate) * dt * PIVOT_STEP_RADIUS;
+    const advance = (forward + yawArc) * grounded;
+
+    if (advance > 1e-6) {
+      this.strideRateValue = advance / this.gait.stride / dt;
+      this.cycle = (this.cycle + advance / this.gait.stride) % 1;
     } else {
       // Settle the clock so the cat always comes to rest square on all fours.
+      this.strideRateValue = 0;
       const settle = 1 - Math.exp(-7 * dt);
       this.cycle = (this.cycle + shortestAngle(this.cycle * Math.PI * 2, 0) / (Math.PI * 2) * settle + 1) % 1;
+    }
+
+    // Foot placement follows how briskly the cat is *stepping*, not how fast it
+    // is translating — otherwise a pivot on the spot has no authority to lift a
+    // paw. It rises promptly so the first step is not late, and falls gently so
+    // the legs settle onto their rest targets instead of freezing mid-stride.
+    const rising = this.strideRateValue > this.strideActivity;
+    this.strideActivity = damp(this.strideActivity, this.strideRateValue, rising ? 20 : 8, dt);
+
+    // Recede every stored contact by the body's own motion. A point fixed to
+    // the floor rotates by the negative of the body's yaw and slides backwards
+    // by the distance travelled, so replaying that here is what keeps a planted
+    // sole on its spot while the torso passes over it.
+    const yaw = input.turnRate * dt * grounded;
+    const cos = Math.cos(yaw);
+    const sin = Math.sin(yaw);
+    for (const contact of this.contacts) {
+      const { x, z } = contact;
+      contact.x = cos * x - sin * z;
+      contact.z = sin * x + cos * z - forward * grounded;
     }
   }
 
@@ -370,40 +491,108 @@ export class CatAnimator {
 
   private updateLegs(input: CatAnimationInput): void {
     const gait = this.gait;
-    const motion = smoothstep(0.02, 0.7, this.smoothedSpeed);
-    const sweep = gait.stride * gait.duty * motion;
-    const lift = gait.lift * motion;
+    // How much authority the gait has over foot placement. At a standstill the
+    // legs collapse onto their rest targets so the cat squares up on all fours
+    // instead of freezing mid-step; any real stepping rate is fully gaited,
+    // including a pivot that covers no ground at all.
+    const gaitWeight = smoothstep(0.04, 0.35, this.strideActivity);
+    const lift = gait.lift * gaitWeight;
+    /** Ground the body covers while one paw is planted, early landing included. */
+    const stanceSpan = gait.stride * (gait.duty + (1 - gait.duty) * (1 - SWING_LAND));
+    /** Ground covered while a paw is travelling to its next print. */
+    const swingSpan = gait.stride * (1 - gait.duty) * SWING_LAND;
+    const airborne = clamp(input.airborne, 0, 1);
     const rideHeight = this.rig.body.position.y;
     const restWeight = Math.max(this.sitWeight, this.sleepWeight);
 
     // Parent bones were just flexed by `updateSpine`; refresh them before
     // converting body-space paw contacts into each articulated leg root.
     this.rig.body.updateWorldMatrix(true, true);
-    if (restWeight > 0.001) this.rig.root.getWorldPosition(this.scratchRootWorld);
+    this.rig.root.getWorldPosition(this.scratchRootWorld);
 
     this.rig.legs.forEach((leg, index) => {
       const phase = (this.cycle + (this.legPhaseOffsets[index] ?? 0)) % 1;
       const stance = phase < gait.duty;
       const t = stance ? phase / gait.duty : (phase - gait.duty) / (1 - gait.duty);
+      // Normalised progress through the swing's travelling portion. Past 1 the
+      // paw has already taken the ground and is waiting out the phase.
+      const swingT = stance ? 1 : t / SWING_LAND;
+      const down = stance || swingT >= 1;
+      const contact = this.contacts[index] ?? {
+        x: leg.restTarget.x, z: leg.restTarget.z, down: true, planted: false,
+      };
 
-      let z = leg.restTarget.z;
-      let y = -rideHeight;
-      let x = leg.restTarget.x;
-      let curl = stance ? 0 : Math.sin(t * Math.PI) * 0.36;
+      // Where this paw wants to land: half a stance span ahead of its rest
+      // target, so the body passes over the print rather than dragging it back.
+      const printX = leg.restTarget.x
+        // Inside legs shorten and outside legs reach while turning.
+        + this.smoothedTurn * 0.014 * leg.side * (leg.isFront ? 1.2 : 0.8);
+      const printZ = leg.restTarget.z + stanceSpan * 0.5 * gaitWeight
+        // Front paws reach further at speed, hind legs tuck under the belly.
+        + (leg.isFront ? gaitWeight * 0.03 : -this.crouchWeight * 0.04);
 
-      if (stance) {
-        z += sweep * (0.5 - t);
+      contact.planted = false;
+      if (airborne > 0.5) {
+        // Nothing is standing on anything. Hold the prints so touchdown starts
+        // from a clean stance instead of a contact left behind at take-off.
+        contact.x = printX;
+        contact.z = printZ;
+        contact.down = false;
+      } else if (down && !contact.down) {
+        contact.x = printX;
+        contact.z = printZ;
+        contact.planted = true;
+      } else if (down) {
+        // A gait re-timing mid-stance (a walk becoming a gallop changes both
+        // the stride and the duty) can recede a contact past what the limb can
+        // hold. Drag it along the limit rather than snapping it to a new print:
+        // a bounded slide in a rare case is far cheaper than a visible pop.
+        const strayX = contact.x - printX;
+        const strayZ = contact.z - printZ;
+        const stray = Math.hypot(strayX, strayZ);
+        const limit = stanceSpan * 1.1 + 0.05;
+        if (stray > limit) {
+          contact.x = printX + strayX * (limit / stray);
+          contact.z = printZ + strayZ * (limit / stray);
+        }
+      }
+      contact.down = down;
+
+      let x: number;
+      let z: number;
+      let liftArc = 0;
+      let curl = 0;
+
+      if (down) {
+        // The stance excursion is not authored: the paw simply holds its spot
+        // and the receding contact carries it back under the moving body.
+        x = contact.x;
+        z = contact.z;
       } else {
-        const eased = t * t * (3 - 2 * t);
-        z += sweep * (-0.5 + eased * 1.06);
-        y += Math.sin(Math.pow(t, 0.85) * Math.PI) * lift;
+        // Swing runs between the receding spot the paw left and the print it is
+        // heading for, offset forward by the ground still to be covered before
+        // touchdown. Both ends recede at the same rate, so the sole arrives with
+        // no ground-relative speed left and plants instead of skidding.
+        const remaining = (1 - swingT) * swingSpan * gaitWeight;
+        const eased = swingT * swingT * (3 - 2 * swingT);
+        x = lerp(contact.x, printX, eased);
+        z = lerp(contact.z, printZ + remaining, eased);
+        liftArc = Math.sin(Math.pow(swingT, 0.85) * Math.PI) * lift;
+        curl = Math.sin(swingT * Math.PI) * 0.36;
       }
 
-      // Inside legs shorten and outside legs reach while turning.
-      x += this.smoothedTurn * 0.014 * leg.side * (leg.isFront ? 1.2 : 0.8);
-      // Front paws reach further at speed, hind legs tuck under the belly.
-      if (leg.isFront) z += motion * 0.03;
-      else z -= this.crouchWeight * 0.04;
+      // Collapse onto the rest target as the cat comes to a halt.
+      x = lerp(leg.restTarget.x, x, gaitWeight);
+      z = lerp(leg.restTarget.z, z, gaitWeight);
+
+      // The locomotion contact, kept aside before the pose overrides below
+      // reshape `x`/`z` for a sit, a loaf, a tuck, or a paw strike.
+      const groundX = x;
+      const groundZ = z;
+      /** How much of this paw's placement is a claim on the floor. */
+      let groundWeight = 1;
+
+      let y = -rideHeight + liftArc;
 
       if (input.airborne > 0.01) {
         const tuck = input.airborne;
@@ -419,6 +608,7 @@ export class CatAnimator {
           y = lerp(y, -rideHeight + lerp(0.07 + gather * 0.11, 0.055, landing), tuck);
         }
         curl = lerp(curl, (1 - landing) * 0.28, tuck);
+        groundWeight *= 1 - tuck;
       }
 
       if (this.sitWeight > 0.01) {
@@ -453,17 +643,31 @@ export class CatAnimator {
         y = lerp(y, -rideHeight + 0.24, strike);
         x = lerp(x, leg.restTarget.x + 0.05, strike);
         curl = lerp(curl, 0.34, strike);
+        groundWeight *= 1 - strike;
       }
 
       leg.root.rotation.z = -leg.side * this.smoothedTurn * 0.012;
       leg.root.updateWorldMatrix(true, false);
       this.scratchTarget.set(x, y, z);
       this.rig.body.localToWorld(this.scratchTarget);
+      const floorY = this.scratchRootWorld.y + SOLE_CLEARANCE;
       // Resting poses pitch the torso around its centre. Pin their contacts to
       // the actual support plane so that raising the seated chest does not lift
       // the forepaws (or drive the tucked hind paws below the floor).
       if (restWeight > 0.001) {
-        this.scratchTarget.y = lerp(this.scratchTarget.y, this.scratchRootWorld.y + 0.004, restWeight);
+        this.scratchTarget.y = lerp(this.scratchTarget.y, floorY, restWeight);
+      }
+      // A locomotion contact is a fact about the floor, so resolve it in the
+      // root frame — which carries only position and facing. Routing it through
+      // the body instead would let the torso's ride height, bob, bank, and
+      // weight-shift sway drag a planted sole around with them, which is most
+      // of the residual skate a body-space stance cannot avoid.
+      const ground = clamp(groundWeight * (1 - restWeight) * (1 - airborne), 0, 1);
+      if (ground > 0.001) {
+        this.scratchGround.set(groundX, 0, groundZ);
+        this.rig.root.localToWorld(this.scratchGround);
+        this.scratchGround.y = floorY + liftArc;
+        this.scratchTarget.lerp(this.scratchGround, ground);
       }
       leg.root.worldToLocal(this.scratchTarget);
       solveLegLocal(leg, this.scratchTarget.x, this.scratchTarget.y, this.scratchTarget.z, curl);

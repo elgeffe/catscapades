@@ -115,14 +115,44 @@ Selection is by smoothed speed with hysteresis; the leg phase offsets are
 *interpolated* toward the new gait rather than switched, so transitions re-time
 the same clock instead of popping.
 
-- `stride` is distance per full cycle. Cycle frequency is `speed / stride`, and
-  stance sweep is `stride × duty`, which is what keeps feet from sliding.
+- `stride` is distance per full cycle, and the cycle clock is an **odometer**:
+  it advances by the ground the cat actually covered (`CatAnimationInput.travel`,
+  measured after collision) plus `|turnRate| × PIVOT_STEP_RADIUS` for yaw. Speed
+  never drives it directly, so pushing into a wall stops the legs and a pivot on
+  the spot still costs steps.
 - `duty` is the fraction of the cycle a foot is planted. Above 0.5 the gait has
   no suspension phase; the gallop's 0.34 does.
 - `crouch` scales ride height; the creep's 0.66 is the stalk pose.
 
-If feet skate, the stance sweep and the frequency disagree — check `stride`, not
-the animation rate.
+If feet skate, suspect the contact frame rather than the rate — see below.
+
+## Ground contacts
+
+A planted paw is not a body-space offset. `CatAnimator` keeps one `FootContact`
+per leg holding the spot on the floor that sole is standing on, and recedes and
+counter-rotates every contact each frame by the body's own travel and yaw. The
+stance excursion is therefore **emergent**: it cannot disagree with the gait rate
+because both come from the same odometer. Consequences:
+
+- Contacts resolve through `rig.root` (position and facing only), never through
+  `cat-body`. Routing them through the body would let ride height, bob, bank, and
+  the weight-shift sway drag a planted sole around with the torso.
+- Planted soles are pinned to `root.worldY + SOLE_CLEARANCE`; a swing paw is
+  pinned to that plane plus its arc height. Airborne, sitting, sleeping, and
+  swiping poses reduce `groundWeight`/raise `restWeight` and are placed in body
+  space instead, because none of them is a claim on the floor.
+- A paw plants when it *arrives* (`SWING_LAND`, at 86% of the swing) rather than
+  at the phase boundary, so a swing only a few frames long does not touch down
+  with a frame of residual skid.
+- Foot authority comes from `strideActivity` — smoothed stride cycles per second
+  — not from linear speed, or a pivot that covers no ground would have no
+  authority to lift a paw. At zero activity the legs collapse onto `restTarget`
+  so the cat squares up on all fours.
+- After a teleport, `resetSecondaryMotion()` re-seats the contacts along with the
+  tail. Skipping it leaves paws trying to stand on a floor the cat has left.
+
+`footPlanted(index)` is true on the frame a leg takes the ground, for footfall
+audio; `strideRate()` reports the odometer clock for the debug overlay.
 
 ## Tail
 
