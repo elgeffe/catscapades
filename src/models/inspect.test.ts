@@ -239,18 +239,32 @@ describe("homeowner rig", () => {
     // The shirt spans hem to collar as a single skinned loft. A separate chest
     // shell plus a collar ring is what used to leave a seam at the neck and a
     // hard edge at the waist.
-    const shirt = rig.torso.getObjectByName("shirt");
+    const shirt = rig.root.getObjectByName("shirt");
     expect(shirt).toBeInstanceOf(THREE.SkinnedMesh);
     expect((shirt as THREE.SkinnedMesh).skeleton.bones)
       .toEqual([rig.hips, rig.torso, rig.neck]);
-    expect(rig.torso.getObjectByName("torso-shell")).toBeUndefined();
-    expect(rig.torso.getObjectByName("shirt-collar")).toBeUndefined();
+    expect(rig.root.getObjectByName("torso-shell")).toBeUndefined();
+    expect(rig.root.getObjectByName("shirt-collar")).toBeUndefined();
 
-    const torsoMeshes = rig.torso.children.filter(
-      (child): child is THREE.Mesh => child instanceof THREE.Mesh,
-    );
-    expect(torsoMeshes.some((mesh) => mesh.geometry instanceof THREE.BoxGeometry)).toBe(false);
-    expect(torsoMeshes.some((mesh) => mesh.geometry instanceof THREE.CapsuleGeometry)).toBe(false);
+    // Skinned clothing hangs off the root, never off a bone it is weighted to:
+    // Three applies a skinned mesh's own world matrix on top of the skinning,
+    // so a mesh under one of its own bones gets that rotation twice.
+    expect(shirt!.parent).toBe(rig.root);
+    for (const name of ["sleeve-left", "sleeve-right", "trouser-left", "trouser-right"]) {
+      const skin = rig.root.getObjectByName(name);
+      expect(skin, name).toBeInstanceOf(THREE.SkinnedMesh);
+      expect(skin!.parent, name).toBe(rig.root);
+      for (const bone of (skin as THREE.SkinnedMesh).skeleton.bones) {
+        expect(skin!.parent === bone, `${name} parented to its own bone`).toBe(false);
+      }
+    }
+
+    const primitives: THREE.Mesh[] = [];
+    rig.root.traverse((child) => {
+      if (child instanceof THREE.Mesh) primitives.push(child);
+    });
+    expect(primitives.some((mesh) => mesh.geometry instanceof THREE.CapsuleGeometry
+      && mesh.name !== "")).toBe(false);
   });
 
   it("keeps the hair crown above the homeowner's eyes", () => {

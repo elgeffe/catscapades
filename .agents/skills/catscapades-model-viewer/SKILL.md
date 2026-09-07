@@ -119,7 +119,7 @@ expensive model error, so check new models against these:
 | Sideboard / washing machine | 1.12 / 1.28 |
 | Kitchen worktop | 1.35 |
 | Wall shelf | 2.02 |
-| Homeowner, standing | ~2.4 |
+| Homeowner, standing | ~2.47 |
 | Wall | 3.2 |
 
 Surface heights are exported from `src/models/furniture.ts` as
@@ -144,6 +144,37 @@ Rules of thumb that have already cost time:
   the cat stands stiff-legged rather than visibly breaking.
 - The tail is a verlet chain in world space. If it whips after a teleport, call
   `CatAnimator.resetSecondaryMotion()`; do not stiffen the chain.
+
+## Working on the homeowner
+
+The homeowner is skinned too, and its traps are different from the cat's.
+
+- **A skinned mesh must not hang off a bone it is weighted to.** Three.js still
+  applies a skinned mesh's own world matrix on top of the skinning, so a mesh
+  parented under one of its own bones gets that bone's rotation twice. With
+  small angles it merely looks soft; with a leg swinging half a radian it throws
+  the trouser seat out behind the hip as a spike of cloth. Every clothing skin
+  therefore hangs off `root`, positioned at the rest position of the joint its
+  geometry was authored around. `inspect.test.ts` asserts this.
+- **Weight the ends deliberately.** `skinAlong` follows the nearest bone past
+  either end of its range. The seat of the trousers belongs to the pelvis and
+  the shoulder of the sleeve to the torso — weighting them to the hip or the
+  shoulder joint swings the whole garment with the limb.
+- **Clothing must contain what is under it.** The shirt hem is the widest part
+  of the garment below the shoulders because everything trouser above that line
+  has to fit inside it, and the shoulder cap is *shirt* with the sleeve buried
+  in it. `owner.test.ts` raycasts outward from every skinned vertex to prove it;
+  hand arithmetic got this wrong three times running.
+- **The bind pose closes exactly**: `hipHeight + hipDrop − thigh − shin −
+  ankleHeight = 0`, so the sole sits on the origin. That leaves the leg fully
+  extended, which a solver cannot reach, so `OwnerAnimator` stands the hips a
+  little lower (`STANDING_FLEX`) and the knee is softly bent.
+- **A step pivots on the heel, then the toe** — never on the ankle. Anchoring
+  the ankle and rotating the foot around it drags the sole across the floor.
+  `legGeometry.heelOffset`/`toeOffset` are what the animator solves against, so
+  they must match the shoe geometry.
+- `hipHeight` is a rig property because the shirt is skinned across the hips and
+  the torso; an animator using a literal shears the waist open.
 
 ## Reporting
 

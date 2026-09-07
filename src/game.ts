@@ -6,7 +6,7 @@ import { resolveInteraction, type InteractionCandidate } from "./core/gameplay";
 import {
   isCatastropheReady, OBJECTIVE_DEFINITIONS, OPTIONAL_OBJECTIVE_DEFINITIONS,
 } from "./core/level-model";
-import { clamp, damp, dampAngle, smoothstep } from "./core/math";
+import { clamp, damp, dampAngle, shortestAngle, smoothstep } from "./core/math";
 import {
   OWNER_SIGHT, evaluateSight, rangeAtAngle, searchPattern,
   type SearchPoint, type SightResult,
@@ -102,6 +102,7 @@ export class CatscapadesGame {
   );
   private readonly scratchVector = new THREE.Vector3();
   private readonly scratchVectorB = new THREE.Vector3();
+  private readonly ownerMeasure = new THREE.Vector3();
   private readonly lookTarget = new THREE.Vector3();
   private readonly catFocus = new THREE.Vector3();
 
@@ -126,6 +127,9 @@ export class CatscapadesGame {
   private ownerDwell = 0;
   private ownerFacing = Math.PI;
   private ownerSpeed = 0;
+  /** Ground covered and yaw turned since the last rendered frame. */
+  private ownerTravel = 0;
+  private ownerTurnRate = 0;
   private ownerAlarm = 0;
   private ownerSurprise = 0;
   private ownerReach = 0;
@@ -757,6 +761,9 @@ export class CatscapadesGame {
     const toCat = this.ownerPosition.distanceTo(catPosition);
     this.updateOwnerSight(dt);
     const sight = this.ownerSight;
+    const facingBefore = this.ownerFacing;
+    const startX = this.ownerPosition.x;
+    const startZ = this.ownerPosition.z;
 
     if (this.ownerState === "routine") {
       const stop = OWNER_ROUTINE[this.ownerStop] ?? OWNER_ROUTINE[0];
@@ -874,6 +881,13 @@ export class CatscapadesGame {
         }
       }
     }
+
+    // Measure what actually happened, after collision, for the stride clock.
+    this.ownerBody.feet(this.ownerMeasure);
+    this.ownerTravel += Math.hypot(
+      this.ownerMeasure.x - startX, this.ownerMeasure.z - startZ,
+    );
+    this.ownerTurnRate = shortestAngle(facingBefore, this.ownerFacing) / Math.max(dt, 1e-4);
 
     this.ownerAlarm = damp(
       this.ownerAlarm,
@@ -1110,13 +1124,17 @@ export class CatscapadesGame {
 
     this.ownerAnimator.update(dt, {
       speed: this.ownerSpeed,
-      turnRate: 0,
+      // The homeowner's legs are timed from ground covered too, so walking
+      // into a doorframe stops them stepping instead of running on the spot.
+      travel: this.ownerTravel,
+      turnRate: this.ownerTurnRate,
       alarm: this.ownerAlarm,
       surprise: this.ownerSurprise,
       reaching: this.ownerReach,
       carrying: this.ownerCarrying,
       lookAt: this.ownerLookAt,
     });
+    this.ownerTravel = 0;
 
     // Carried props ride the mouth socket rather than being re-simulated.
     if (this.carrying) {

@@ -19,6 +19,14 @@ import {
  * are carrying something, whether they have just noticed the cat — so the joint
  * names and hierarchy are a contract `OwnerAnimator` and the carry socket
  * depend on. Feet are now real joints so a step can roll heel to toe.
+ *
+ * One rule the skinning depends on: **every skinned mesh hangs off `root`, not
+ * off a bone.** Three.js still applies a skinned mesh's own world matrix on top
+ * of the skinning, so a mesh parented under a bone it is also weighted to has
+ * that bone's rotation applied twice. With small joint angles this merely looks
+ * soft; with a leg swinging half a radian it throws the trouser seat out behind
+ * the hip as a spike. Each skin therefore sits on `root` at the rest position
+ * of the joint its geometry was authored around.
  */
 export interface OwnerRig {
   readonly root: THREE.Group;
@@ -61,6 +69,12 @@ export interface OwnerLegGeometry {
   readonly ankleHeight: number;
   /** Lateral offset of each hip from the spine. */
   readonly hipSpacing: number;
+  /**
+   * Heel and toe positions along Z, measured from the ankle. A step pivots on
+   * one or the other, never on the ankle itself, so the animator needs them.
+   */
+  readonly heelOffset: number;
+  readonly toeOffset: number;
 }
 
 /**
@@ -79,6 +93,9 @@ const THIGH_LENGTH = 0.56;
 const SHIN_LENGTH = 0.52;
 const ANKLE_HEIGHT = 0.12;
 const HIP_SPACING = 0.125;
+/** Shoe extents along Z, relative to the ankle. Must match the shoe geometry. */
+const HEEL_OFFSET = -0.085;
+const TOE_OFFSET = 0.182;
 
 export function buildOwner(): OwnerRig {
   const shirt = surface(PALETTE.shirt, { roughness: 0.92 });
@@ -151,7 +168,8 @@ export function buildOwner(): OwnerRig {
   shirtSkin.frustumCulled = false;
   shirtSkin.castShadow = true;
   shirtSkin.receiveShadow = true;
-  torso.add(shirtSkin);
+  shirtSkin.position.y = HIP_HEIGHT + torso.position.y;
+  root.add(shirtSkin);
 
   const neckMesh = new THREE.Mesh(
     buildOwnerLoft([
@@ -215,15 +233,17 @@ export function buildOwner(): OwnerRig {
 
     const ear = new THREE.Mesh(
       buildOwnerLoft([
-        { at: -0.038, halfWidth: 0.009, halfDepth: 0.02 },
-        { at: 0, halfWidth: 0.012, halfDepth: 0.031 },
-        { at: 0.034, halfWidth: 0.009, halfDepth: 0.024 },
+        { at: -0.04, halfWidth: 0.006, halfDepth: 0.021 },
+        { at: 0, halfWidth: 0.008, halfDepth: 0.032 },
+        { at: 0.036, halfWidth: 0.006, halfDepth: 0.025 },
       ], { radialSegments: 8 }),
       skin,
     );
     ear.name = side < 0 ? "ear-left" : "ear-right";
-    ear.position.set(side * 0.121, 0.15, -0.012);
-    ear.rotation.z = side * -0.14;
+    // Laid flat against the skull. Standing off it reads as a bead stuck on
+    // the side of the head rather than an ear.
+    ear.position.set(side * 0.118, 0.148, -0.016);
+    ear.rotation.z = side * -0.16;
     head.add(ear);
   }
 
@@ -280,14 +300,22 @@ export function buildOwner(): OwnerRig {
         { at: -0.02, halfWidth: 0.056, halfDepth: 0.055 },
       ], {
         radialSegments: 12,
-        skinAt: skinAlong([{ at: -0.63, index: 2 }, { at: -0.32, index: 1 }, { at: -0.02, index: 0 }]),
+        // The shoulder of the sleeve belongs to the torso: weighting it to the
+        // shoulder joint swings the whole cap with the arm.
+        skinAt: skinAlong([
+          { at: -0.63, index: 3 }, { at: -0.32, index: 2 },
+          { at: -0.06, index: 1 }, { at: 0.02, index: 0 },
+        ]),
       }),
       shirt,
     );
     sleeve.name = side < 0 ? "sleeve-left" : "sleeve-right";
     sleeve.frustumCulled = false;
     sleeve.castShadow = true;
-    shoulder.add(sleeve);
+    sleeve.position.set(
+      shoulder.position.x, HIP_HEIGHT + torso.position.y + shoulder.position.y, 0,
+    );
+    root.add(sleeve);
 
     const hand = new THREE.Mesh(buildOwnerHandGeometry(), skin);
     hand.name = side < 0 ? "hand-left" : "hand-right";
@@ -305,11 +333,13 @@ export function buildOwner(): OwnerRig {
   for (const [index, side] of [-1, 1].entries()) {
     const shoulder = arms[index]!;
     const elbow = forearms[index]!;
-    const sleeve = shoulder.getObjectByName(side < 0 ? "sleeve-left" : "sleeve-right");
+    const sleeve = root.getObjectByName(side < 0 ? "sleeve-left" : "sleeve-right");
     if (sleeve instanceof THREE.SkinnedMesh) {
       // A forearm bone is not modelled separately, so the wrist end simply
-      // follows the elbow: bones are [shoulder, elbow, elbow].
-      sleeve.bind(new THREE.Skeleton([shoulder, elbow, elbow]), sleeve.matrixWorld.clone());
+      // follows the elbow: bones are [torso, shoulder, elbow, elbow].
+      sleeve.bind(
+        new THREE.Skeleton([torso, shoulder, elbow, elbow]), sleeve.matrixWorld.clone(),
+      );
     }
   }
 
@@ -361,10 +391,14 @@ export function buildOwner(): OwnerRig {
         { at: 0.1, halfWidth: 0.078, halfDepth: 0.086, offsetX: side * -0.056 },
       ], {
         radialSegments: 12,
+        // Four bones, not three: the seat of the trousers belongs to the
+        // pelvis. Weighting it to the hip made the whole seat swing with the
+        // leg, which is not something trousers do.
         skinAt: skinAlong([
-          { at: -(THIGH_LENGTH + SHIN_LENGTH), index: 2 },
-          { at: -THIGH_LENGTH, index: 1 },
-          { at: 0.09, index: 0 },
+          { at: -(THIGH_LENGTH + SHIN_LENGTH), index: 3 },
+          { at: -THIGH_LENGTH, index: 2 },
+          { at: -0.14, index: 1 },
+          { at: 0.02, index: 0 },
         ]),
       }),
       trousers,
@@ -372,7 +406,8 @@ export function buildOwner(): OwnerRig {
     trouserLeg.name = side < 0 ? "trouser-left" : "trouser-right";
     trouserLeg.frustumCulled = false;
     trouserLeg.castShadow = true;
-    hip.add(trouserLeg);
+    trouserLeg.position.set(hip.position.x, HIP_HEIGHT + hip.position.y, 0);
+    root.add(trouserLeg);
 
     const shoe = new THREE.Mesh(buildOwnerShoeGeometry(), shoeLeather);
     shoe.name = side < 0 ? "shoe-left" : "shoe-right";
@@ -390,9 +425,9 @@ export function buildOwner(): OwnerRig {
     const hip = legs[index]!;
     const knee = shins[index]!;
     const ankle = feet[index]!;
-    const leg = hip.getObjectByName(side < 0 ? "trouser-left" : "trouser-right");
+    const leg = root.getObjectByName(side < 0 ? "trouser-left" : "trouser-right");
     if (leg instanceof THREE.SkinnedMesh) {
-      leg.bind(new THREE.Skeleton([hip, knee, ankle]), leg.matrixWorld.clone());
+      leg.bind(new THREE.Skeleton([hips, hip, knee, ankle]), leg.matrixWorld.clone());
     }
   }
 
@@ -437,6 +472,8 @@ export function buildOwner(): OwnerRig {
       shinLength: SHIN_LENGTH,
       ankleHeight: ANKLE_HEIGHT,
       hipSpacing: HIP_SPACING,
+      heelOffset: HEEL_OFFSET,
+      toeOffset: TOE_OFFSET,
     },
   };
 }

@@ -2,13 +2,52 @@ import type { CatLegRig } from "../models/cat";
 import { clamp } from "../core/math";
 
 /**
- * Two-bone IK for a digitigrade limb.
+ * Two-bone IK.
  *
- * The solver targets the *ankle*, not the toes, and then orients the metapodial
- * separately. That single choice is what gives the cat a hock and a pastern
- * instead of a human ankle, and it is shared between the rig's rest pose and
- * the runtime animator so the two can never drift apart.
+ * `solveTwoBone` is the shared trigonometry: given two segment lengths and a
+ * target in the sagittal plane, it returns the rotations that reach it. The cat
+ * and the homeowner both use it and then part company, because the joint below
+ * the two bones is what makes a limb read as one species or another.
+ *
+ * For the cat, the solver targets the *ankle*, not the toes, and then orients
+ * the metapodial separately. That single choice is what gives the cat a hock
+ * and a pastern instead of a human ankle, and it is shared between the rig's
+ * rest pose and the runtime animator so the two can never drift apart.
  */
+
+export interface TwoBoneSolution {
+  /** Rotation of the upper segment about X, from straight down. */
+  readonly upper: number;
+  /** Rotation of the lower segment about X, relative to the upper. */
+  readonly lower: number;
+}
+
+/**
+ * Reaches `(targetY, targetZ)` — measured from the limb root, in the limb
+ * root's own space — with two segments of length `l1` and `l2`.
+ *
+ * `bend` is `+1` to bend the middle joint backwards (a front-leg elbow) and
+ * `-1` forwards (a stifle, or a human knee). The reach is clamped rather than
+ * throwing: an over-long target quietly straightens the limb, which is a
+ * stiff-looking pose but never a broken one.
+ */
+export function solveTwoBone(
+  l1: number,
+  l2: number,
+  targetY: number,
+  targetZ: number,
+  bend: number,
+): TwoBoneSolution {
+  const reach = Math.hypot(targetY, targetZ);
+  const distance = clamp(reach, Math.abs(l1 - l2) + 0.012, l1 + l2 - 0.006);
+  const toTarget = Math.atan2(-targetZ, -targetY);
+  const cosUpper = clamp((distance * distance + l1 * l1 - l2 * l2) / (2 * distance * l1), -1, 1);
+  const cosJoint = clamp((l1 * l1 + l2 * l2 - distance * distance) / (2 * l1 * l2), -1, 1);
+  return {
+    upper: toTarget + bend * Math.acos(cosUpper),
+    lower: -bend * (Math.PI - Math.acos(cosJoint)),
+  };
+}
 
 /** Metapodial angle from vertical: hind hocks sit high and far back. */
 export const HIND_ANKLE_ANGLE = 0.64;
@@ -55,16 +94,9 @@ export function solveLegLocal(
   const ankleY = localY + leg.footLength * Math.cos(ankleAngle);
   const ankleZ = localZ - leg.footLength * Math.sin(ankleAngle);
 
-  const l1 = leg.upperLength;
-  const l2 = leg.lowerLength;
-  const reach = Math.hypot(ankleY, ankleZ);
-  const distance = clamp(reach, Math.abs(l1 - l2) + 0.012, l1 + l2 - 0.006);
-
-  const toTarget = Math.atan2(-ankleZ, -ankleY);
-  const cosUpper = clamp((distance * distance + l1 * l1 - l2 * l2) / (2 * distance * l1), -1, 1);
-  const cosJoint = clamp((l1 * l1 + l2 * l2 - distance * distance) / (2 * l1 * l2), -1, 1);
-  const upperAngle = toTarget + leg.bend * Math.acos(cosUpper);
-  const jointAngle = -leg.bend * (Math.PI - Math.acos(cosJoint));
+  const { upper: upperAngle, lower: jointAngle } = solveTwoBone(
+    leg.upperLength, leg.lowerLength, ankleY, ankleZ, leg.bend,
+  );
 
   leg.upper.rotation.x = upperAngle;
   leg.lower.rotation.x = jointAngle;

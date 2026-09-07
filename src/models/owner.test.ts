@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import { buildOwner } from "./owner";
 import { OwnerAnimator, type OwnerAnimationInput } from "../anim/owner-animator";
+import { skinAlong } from "./owner-geometry";
 
 const REST: OwnerAnimationInput = {
   speed: 0, turnRate: 0, alarm: 0, surprise: 0, reaching: 0, carrying: false, lookAt: null,
@@ -135,5 +136,47 @@ describe("homeowner clothing surfaces", () => {
       expect(inner, name).toBeGreaterThan(spacing + 0.08);
       expect(Math.sign(vertices[0]!.x), name).toBe(side);
     }
+  });
+});
+
+describe("skinAlong", () => {
+  it("follows the nearest bone past either end of the range", () => {
+    const sampler = skinAlong([{ at: 0, index: 5 }, { at: 1, index: 7 }]);
+    /** How much of the sample at `at` is carried by bone `index`. */
+    const weightOf = (at: number, index: number): number => {
+      const sample = sampler(at);
+      return sample.indices.reduce(
+        (total, bone, slot) => (bone === index ? total + sample.weights[slot]! : total), 0,
+      );
+    };
+
+    // Below the lowest bone and above the highest, weight fully to that bone.
+    // Reversing these sends the top of a surface to the bottom bone, which is
+    // how the trouser seat ended up chasing the foot.
+    expect(weightOf(-2, 5)).toBeCloseTo(1);
+    expect(weightOf(0, 5)).toBeCloseTo(1);
+    expect(weightOf(1, 7)).toBeCloseTo(1);
+    expect(weightOf(3, 7)).toBeCloseTo(1);
+    expect(weightOf(3, 5)).toBeCloseTo(0);
+  });
+
+  it("blends the pair spanning the sample, eased towards the joint", () => {
+    const sampler = skinAlong([{ at: 0, index: 0 }, { at: 1, index: 1 }]);
+    const middle = sampler(0.5);
+    expect(middle.indices).toEqual([0, 1, 0, 0]);
+    expect(middle.weights[0]).toBeCloseTo(0.5);
+    expect(middle.weights[1]).toBeCloseTo(0.5);
+    // Eased, so the crossover sits at the joint rather than smearing evenly.
+    expect(sampler(0.25).weights[1]).toBeLessThan(0.25);
+    expect(sampler(0.75).weights[1]).toBeGreaterThan(0.75);
+    for (const at of [0.1, 0.4, 0.6, 0.9]) {
+      const sample = sampler(at);
+      expect(sample.weights.reduce((total, weight) => total + weight, 0)).toBeCloseTo(1);
+    }
+  });
+
+  it("accepts bones in any order", () => {
+    const sampler = skinAlong([{ at: 1, index: 1 }, { at: 0, index: 0 }]);
+    expect(sampler(0.5).indices).toEqual([0, 1, 0, 0]);
   });
 });

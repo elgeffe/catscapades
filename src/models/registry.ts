@@ -12,7 +12,9 @@ import {
   buildMouseToy, buildMug, buildMugShards, buildPuddle, buildSausage, buildSock, buildSponge,
 } from "./props";
 import { CatAnimator, NEUTRAL_CAT_ANIMATION, type CatAnimationInput } from "../anim/cat-animator";
-import { OwnerAnimator, type OwnerAnimationInput } from "../anim/owner-animator";
+import {
+  NEUTRAL_OWNER_ANIMATION, OwnerAnimator, type OwnerAnimationInput,
+} from "../anim/owner-animator";
 
 /**
  * Model registry.
@@ -160,6 +162,8 @@ const OWNER_CLIPS: Readonly<Record<string, Partial<OwnerAnimationInput>>> = {
   alarmed: { speed: 0, alarm: 1, surprise: 0.8 },
   reaching: { reaching: 1 },
   carrying: { speed: 1.1, carrying: true },
+  turning: { speed: 1.2, turnRate: 1.6 },
+  pivot: { speed: 0, turnRate: 1.4, alarm: 0.3 },
 };
 
 class OwnerDriver implements ModelDriver {
@@ -174,10 +178,7 @@ class OwnerDriver implements ModelDriver {
   }
 
   update(dt: number): void {
-    const base: OwnerAnimationInput = {
-      speed: 0, turnRate: 0, alarm: 0, surprise: 0, reaching: 0, carrying: false, lookAt: null,
-    };
-    this.animator.update(dt, { ...base, ...OWNER_CLIPS[this.clip] });
+    this.animator.update(dt, { ...NEUTRAL_OWNER_ANIMATION, ...OWNER_CLIPS[this.clip] });
   }
 }
 

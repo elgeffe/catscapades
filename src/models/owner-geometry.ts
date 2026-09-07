@@ -146,13 +146,16 @@ export function skinAlong(
   bones: readonly { readonly at: number; readonly index: number }[],
 ): OwnerSkinSampler {
   const sorted = [...bones].sort((a, b) => a.at - b.at);
+  const lowest = sorted[0]!;
+  const highest = sorted[sorted.length - 1]!;
   return (at) => {
-    let upper = sorted.findIndex((bone) => bone.at > at);
-    if (upper <= 0) {
-      const only = sorted[Math.max(0, upper)] ?? sorted[0]!;
-      return { indices: [only.index, 0, 0, 0], weights: [1, 0, 0, 0] };
-    }
-    if (upper >= sorted.length) upper = sorted.length - 1;
+    const upper = sorted.findIndex((bone) => bone.at > at);
+    // Past the ends, follow the nearest bone. Getting this backwards weights
+    // the *top* of a surface to the *lowest* bone, which sends the seat of the
+    // trousers wherever the foot goes and the shirt collar wherever the hips
+    // go — a spike of cloth flying off the model with no obvious cause.
+    if (upper < 0) return { indices: [highest.index, 0, 0, 0], weights: [1, 0, 0, 0] };
+    if (upper === 0) return { indices: [lowest.index, 0, 0, 0], weights: [1, 0, 0, 0] };
     const low = sorted[upper - 1]!;
     const high = sorted[upper]!;
     const span = high.at - low.at;
