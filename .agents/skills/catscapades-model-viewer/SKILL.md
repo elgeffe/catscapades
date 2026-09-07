@@ -149,6 +149,14 @@ Rules of thumb that have already cost time:
 
 The homeowner is skinned too, and its traps are different from the cat's.
 
+- **Check the winding, and never by eye.** A loft wound inside out does not
+  fail loudly: back-face culling shows the far side's *interior* through the
+  near surface, so the figure reads as faintly transparent, its lighting is
+  inverted, and — worst of all — anything authored just inside the surface
+  (eyes, a nose, a mouth) becomes visible and looks correct. Fixing the winding
+  then appears to "delete the face". `owner.test.ts` asserts both directions:
+  that every side face points away from the loft axis, and that each face
+  feature is the first thing a ray from in front actually hits.
 - **A skinned mesh must not hang off a bone it is weighted to.** Three.js still
   applies a skinned mesh's own world matrix on top of the skinning, so a mesh
   parented under one of its own bones gets that bone's rotation twice. With

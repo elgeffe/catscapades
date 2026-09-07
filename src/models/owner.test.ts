@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import { buildOwner } from "./owner";
 import { OwnerAnimator, type OwnerAnimationInput } from "../anim/owner-animator";
-import { skinAlong } from "./owner-geometry";
+import { buildOwnerLoft, buildOwnerShoeGeometry, skinAlong } from "./owner-geometry";
 
 const REST: OwnerAnimationInput = {
   speed: 0, turnRate: 0, alarm: 0, surprise: 0, reaching: 0, carrying: false, lookAt: null,
@@ -40,7 +40,31 @@ function restedOwner() {
 }
 
 /**
- * Is `point` inside `surface`?
+ * A plain, double-sided copy of a mesh in its current posed world position.
+ *
+ * Raycasts honour `material.side`, and the clothing is `FrontSide`, so casting
+ * outward from *inside* a garment misses every triangle — the front faces are
+ * pointing away. Rebuilding the posed surface as a double-sided mesh makes the
+ * containment check independent of which way the faces happen to be wound,
+ * which matters because a reversed winding is itself a bug this file catches.
+ */
+function posedShell(mesh: THREE.Mesh): THREE.Mesh {
+  const vertices = worldVertices(mesh);
+  const geometry = new THREE.BufferGeometry();
+  const positions = new Float32Array(vertices.length * 3);
+  vertices.forEach((vertex, index) => {
+    positions[index * 3] = vertex.x;
+    positions[index * 3 + 1] = vertex.y;
+    positions[index * 3 + 2] = vertex.z;
+  });
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const source = mesh.geometry.getIndex();
+  if (source) geometry.setIndex(Array.from(source.array));
+  return new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+}
+
+/**
+ * Is `point` inside `shell`?
  *
  * Cast outward from the point, horizontally away from the body's vertical
  * axis. A point inside the surface hits it from within; a point outside cannot
@@ -48,13 +72,12 @@ function restedOwner() {
  * through a shirt — the exact failure that makes clothing read as separate
  * lumps stuck onto a torso.
  */
-function insideSurface(point: THREE.Vector3, surface: THREE.Mesh): boolean {
+function insideSurface(point: THREE.Vector3, shell: THREE.Mesh): boolean {
   const outward = new THREE.Vector3(point.x, 0, point.z);
   if (outward.lengthSq() < 1e-8) return true;
   outward.normalize();
   const raycaster = new THREE.Raycaster(point, outward, 0, 1);
-  raycaster.firstHitOnly = false;
-  return raycaster.intersectObject(surface, false).length > 0;
+  return raycaster.intersectObject(shell, false).length > 0;
 }
 
 describe("homeowner clothing surfaces", () => {
@@ -62,6 +85,7 @@ describe("homeowner clothing surfaces", () => {
     const rig = restedOwner();
     const shirt = findMesh(rig.root, "shirt");
     const shirtVertices = worldVertices(shirt);
+    const shell = posedShell(shirt);
     const hem = Math.min(...shirtVertices.map((vertex) => vertex.y));
     const collar = Math.max(...shirtVertices.map((vertex) => vertex.y));
     expect(hem).toBeLessThan(rig.hipHeight);
@@ -71,7 +95,7 @@ describe("homeowner clothing surfaces", () => {
       const escaped = worldVertices(mesh).filter((vertex) => (
         // Only the overlap matters. Below the hem the trousers are on show,
         // and there is nothing above the collar.
-        vertex.y > hem + 0.012 && vertex.y < collar && !insideSurface(vertex, shirt)
+        vertex.y > hem + 0.012 && vertex.y < collar && !insideSurface(vertex, shell)
       ));
       expect(escaped.map((vertex) => `${vertex.x.toFixed(3)},${vertex.y.toFixed(3)},${vertex.z.toFixed(3)}`))
         .toEqual([]);
@@ -99,13 +123,14 @@ describe("homeowner clothing surfaces", () => {
   it("keeps each sleeve inside the shirt's shoulder cap", () => {
     const rig = restedOwner();
     const shirt = findMesh(rig.root, "shirt");
+    const shell = posedShell(shirt);
     const shoulderTop = Math.max(...worldVertices(shirt).map((vertex) => vertex.y)) - 0.12;
 
     for (const name of ["sleeve-left", "sleeve-right"]) {
       const sleeve = findMesh(rig.root, name);
       const escaped = worldVertices(sleeve).filter((vertex) => (
         // Only the buried top of the sleeve; the rest of the arm is on show.
-        vertex.y > shoulderTop && !insideSurface(vertex, shirt)
+        vertex.y > shoulderTop && !insideSurface(vertex, shell)
       ));
       expect(escaped.map((vertex) => `${vertex.x.toFixed(3)},${vertex.y.toFixed(3)},${vertex.z.toFixed(3)}`))
         .toEqual([]);
@@ -178,5 +203,162 @@ describe("skinAlong", () => {
   it("accepts bones in any order", () => {
     const sampler = skinAlong([{ at: 1, index: 1 }, { at: 0, index: 0 }]);
     expect(sampler(0.5).indices).toEqual([0, 1, 0, 0]);
+  });
+});
+
+describe("owner loft winding", () => {
+  it("points every side face outwards, away from the loft axis", () => {
+    // Reversing the winding does not throw: back-face culling then shows the
+    // far side's interior through the near surface, so the figure reads as
+    // faintly transparent and its lighting is inverted. Assert the direction.
+    const geometry = buildOwnerLoft([
+      { at: 0, halfWidth: 0.3, halfDepth: 0.2 },
+      { at: 0.5, halfWidth: 0.35, halfDepth: 0.25 },
+      { at: 1, halfWidth: 0.2, halfDepth: 0.15 },
+    ], { radialSegments: 12, capStart: false, capEnd: false });
+
+    const position = geometry.getAttribute("position");
+    const index = geometry.getIndex()!;
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const edge1 = new THREE.Vector3();
+    const edge2 = new THREE.Vector3();
+    const normal = new THREE.Vector3();
+    const centroid = new THREE.Vector3();
+    const outward = new THREE.Vector3();
+
+    let checked = 0;
+    for (let triangle = 0; triangle < index.count; triangle += 3) {
+      a.fromBufferAttribute(position as THREE.BufferAttribute, index.getX(triangle));
+      b.fromBufferAttribute(position as THREE.BufferAttribute, index.getX(triangle + 1));
+      c.fromBufferAttribute(position as THREE.BufferAttribute, index.getX(triangle + 2));
+      normal.copy(edge1.subVectors(b, a)).cross(edge2.subVectors(c, a));
+      centroid.copy(a).add(b).add(c).multiplyScalar(1 / 3);
+      // Away from the Y axis, which the loft is built around.
+      outward.set(centroid.x, 0, centroid.z);
+      if (outward.lengthSq() < 1e-8) continue;
+      expect(normal.dot(outward), `triangle ${triangle / 3} faces inwards`)
+        .toBeGreaterThan(0);
+      checked += 1;
+    }
+    expect(checked).toBeGreaterThan(20);
+  });
+
+  it("gives the built homeowner outward normals on its clothing", () => {
+    const rig = buildOwner();
+    for (const name of ["shirt", "sleeve-left", "trouser-right"]) {
+      const mesh = findMesh(rig.root, name);
+      const normals = mesh.geometry.getAttribute("normal");
+      const position = mesh.geometry.getAttribute("position");
+      expect(normals, name).toBeDefined();
+
+      let outwardCount = 0;
+      let sampled = 0;
+      const point = new THREE.Vector3();
+      const normal = new THREE.Vector3();
+      for (let vertex = 0; vertex < position.count; vertex += 1) {
+        point.fromBufferAttribute(position as THREE.BufferAttribute, vertex);
+        normal.fromBufferAttribute(normals as THREE.BufferAttribute, vertex);
+        // Skip the axis itself: cap centres have no meaningful outward.
+        if (Math.hypot(point.x, point.z) < 0.02) continue;
+        sampled += 1;
+        if (normal.x * point.x + normal.z * point.z > 0) outwardCount += 1;
+      }
+      expect(sampled, name).toBeGreaterThan(20);
+      // Overwhelmingly outward: a few vertices near a waist or a cap seam can
+      // legitimately tip the other way once normals are smoothed.
+      expect(outwardCount / sampled, `${name} is lit inside out`).toBeGreaterThan(0.9);
+    }
+  });
+});
+
+describe("homeowner face", () => {
+  it("puts every feature proud of the head rather than inside it", () => {
+    const rig = buildOwner();
+    rig.root.updateMatrixWorld(true);
+    const skull = findMesh(rig.head, "skull");
+    const raycaster = new THREE.Raycaster();
+
+    /** What you actually see looking straight at a point on the face. */
+    const firstHit = (x: number, y: number, feature: THREE.Mesh): THREE.Object3D | undefined => {
+      const from = rig.head.localToWorld(new THREE.Vector3(x, y, 1));
+      const to = rig.head.localToWorld(new THREE.Vector3(x, y, 0));
+      raycaster.set(from, to.sub(from).normalize());
+      return raycaster.intersectObjects([feature, skull], false)[0]?.object;
+    };
+
+    // The features were only ever visible because the head's own faces were
+    // wound inside out, so you could see through them. With the winding fixed
+    // they have to actually stand out from the surface.
+    for (const [name, x, y] of [
+      ["eye-left", -0.052, 0.173],
+      ["eye-right", 0.052, 0.173],
+      ["eyebrow-left", -0.054, 0.212],
+      ["eyebrow-right", 0.054, 0.212],
+      ["nose", 0, 0.152],
+      ["mouth", 0, 0.084],
+    ] as const) {
+      const feature = findMesh(rig.head, name);
+      expect(firstHit(x, y, feature)?.name, `${name} is buried inside the head`)
+        .toBe(name);
+    }
+  });
+
+  it("keeps the hairline above the eyebrows", () => {
+    const rig = buildOwner();
+    const hair = new THREE.Box3().setFromObject(findMesh(rig.head, "hair-crown"));
+    const brow = new THREE.Box3().setFromObject(findMesh(rig.head, "eyebrow-left"));
+    expect(hair.min.y).toBeGreaterThan(brow.max.y);
+  });
+
+  it("leaves no invisible face geometry behind", () => {
+    const rig = buildOwner();
+    // The recessed eye sockets cost 280 triangles and could never be seen.
+    expect(rig.head.getObjectByName("eye-socket-left")).toBeUndefined();
+    expect(rig.head.getObjectByName("eye-socket-right")).toBeUndefined();
+  });
+});
+
+describe("shoe winding", () => {
+  it("points its sides and both caps outwards", () => {
+    // The shoe has its own hand-wound profile rather than going through
+    // `buildOwnerLoft`, so it needs its own check: it was inside out too.
+    const geometry = buildOwnerShoeGeometry();
+    const position = geometry.getAttribute("position");
+    const index = geometry.getIndex()!;
+    const box = new THREE.Box3().setFromBufferAttribute(position as THREE.BufferAttribute);
+    const middle = box.getCenter(new THREE.Vector3());
+
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const normal = new THREE.Vector3();
+    const centroid = new THREE.Vector3();
+    let outward = 0;
+    let total = 0;
+
+    for (let triangle = 0; triangle < index.count; triangle += 3) {
+      a.fromBufferAttribute(position as THREE.BufferAttribute, index.getX(triangle));
+      b.fromBufferAttribute(position as THREE.BufferAttribute, index.getX(triangle + 1));
+      c.fromBufferAttribute(position as THREE.BufferAttribute, index.getX(triangle + 2));
+      normal.copy(b).sub(a).cross(c.clone().sub(a));
+      centroid.copy(a).add(b).add(c).multiplyScalar(1 / 3).sub(middle);
+      if (centroid.lengthSq() < 1e-8) continue;
+      total += 1;
+      if (normal.dot(centroid) > 0) outward += 1;
+    }
+    expect(total).toBeGreaterThan(40);
+    // A convex-ish shell: essentially every face should point away from the
+    // interior. The sole's own flat underside is the only ambiguous case.
+    expect(outward / total).toBeGreaterThan(0.9);
+  });
+
+  it("still sits exactly on its own origin after the rewind", () => {
+    const geometry = buildOwnerShoeGeometry();
+    const box = new THREE.Box3().setFromBufferAttribute(
+      geometry.getAttribute("position") as THREE.BufferAttribute,
+    );
+    expect(box.min.y).toBeCloseTo(0, 5);
   });
 });

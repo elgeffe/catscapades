@@ -20,6 +20,17 @@ import type { NavigationObstacle } from "../core/pathfinding";
 /** 1 world unit is ~0.67 m, so gravity is scaled to match the authored house. */
 export const WORLD_GRAVITY = -14.6;
 
+/**
+ * Colliders the cat must never be able to perch on, whatever their height.
+ *
+ * A ledge probe that takes any top face it finds will happily offer the top of
+ * a boundary wall or a garden fence, and from a wall shelf or a planter those
+ * tops are within a cat's jump. One legitimate climb then chains into leaving
+ * the level entirely. Height alone cannot express this, because the shelf the
+ * cat is *meant* to reach is nearly as high.
+ */
+const UNCLIMBABLE_LABELS: ReadonlySet<string> = new Set(["wall", "fence"]);
+
 export interface StaticBoxOptions {
   /** Box centre in world space. */
   readonly center: THREE.Vector3 | readonly [number, number, number];
@@ -332,6 +343,8 @@ export class PhysicsWorld {
         );
         const hit = this.world.castRay(ray, maxHeight + 0.5, true);
         if (!hit) continue;
+        // A wall or a fence is not a ledge, however flat its top is.
+        if (UNCLIMBABLE_LABELS.has(this.staticLabels.get(hit.collider.handle) ?? "")) continue;
         const top = origin.y + maxHeight + 0.4 - hit.timeOfImpact;
         if (top <= origin.y + 0.12 || top > origin.y + maxHeight) continue;
         if (!best || top > best.height) best = { height: top, distance: step };
@@ -398,6 +411,14 @@ export class PhysicsWorld {
         halfExtents: { x: obstacle.halfExtents.x, z: obstacle.halfExtents.z },
         rotationY: obstacle.rotationY,
       }));
+  }
+
+  /** True when the collider at a point is one the cat may never perch on. */
+  isClimbableAt(x: number, y: number, z: number, probeHeight = 0.4): boolean {
+    const ray = new RAPIER.Ray({ x, y: y + probeHeight, z }, { x: 0, y: -1, z: 0 });
+    const hit = this.world.castRay(ray, probeHeight * 2, true);
+    if (!hit) return false;
+    return !UNCLIMBABLE_LABELS.has(this.staticLabels.get(hit.collider.handle) ?? "");
   }
 
   /** Number of dynamic bodies currently awake, for the debug overlay. */

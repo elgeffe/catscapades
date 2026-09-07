@@ -991,8 +991,6 @@ export class CatscapadesGame {
     this.updateOwnerSight(dt);
     const sight = this.ownerSight;
     const facingBefore = this.ownerFacing;
-    const startX = this.ownerPosition.x;
-    const startZ = this.ownerPosition.z;
 
     if (this.ownerState === "routine") {
       const stop = OWNER_ROUTINE[this.ownerStop] ?? OWNER_ROUTINE[0];
@@ -1118,11 +1116,11 @@ export class CatscapadesGame {
       }
     }
 
-    // Measure what actually happened, after collision, for the stride clock.
-    this.ownerBody.feet(this.ownerMeasure);
-    this.ownerTravel += Math.hypot(
-      this.ownerMeasure.x - startX, this.ownerMeasure.z - startZ,
-    );
+    // Travel is accumulated inside `moveOwnerToward`, from the movement Rapier
+    // actually resolved. It cannot be measured here by diffing the body's
+    // translation: a kinematic body does not move until the world steps, one
+    // call later, so both readings are the same value and the stride clock
+    // never advances — the homeowner slides along without ever taking a step.
     this.ownerTurnRate = shortestAngle(facingBefore, this.ownerFacing) / Math.max(dt, 1e-4);
 
     this.ownerAlarm = damp(
@@ -1333,6 +1331,10 @@ export class CatscapadesGame {
       this.ownerDesired.x * step, -0.2 * dt, this.ownerDesired.z * step,
     ));
     const planarMovement = Math.hypot(movement.translation.x, movement.translation.z);
+    // The stride clock runs on this: ground the homeowner actually covered,
+    // after Rapier resolved the move. Walking into a doorframe therefore stops
+    // their legs instead of running them on the spot.
+    this.ownerTravel += planarMovement;
     if (step > 0.002 && planarMovement < step * 0.15) this.ownerStuckTime += dt;
     else this.ownerStuckTime = Math.max(0, this.ownerStuckTime - dt * 2);
     if (this.ownerStuckTime > 0.3) {

@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import type { CharacterBody, PhysicsWorld } from "../physics/physics-world";
 import { WORLD_GRAVITY } from "../physics/physics-world";
-import { JUMP_TARGETS, type JumpTargetSpec } from "../level/level-data";
+import { JUMP_TARGETS, WORLD, type JumpTargetSpec } from "../level/level-data";
 import { clamp, damp, dampAngle, shortestAngle, smoothstep } from "../core/math";
 
 /**
@@ -47,6 +47,17 @@ const MAX_LEDGE_HEIGHT = 1.5;
 const LEDGE_REACH = 1.05;
 const COYOTE_TIME = 0.12;
 const JUMP_BUFFER = 0.16;
+/**
+ * The highest surface the cat may ever end a leap on.
+ *
+ * The wall shelf at 2.02 is the top of the authored traversal, so anything
+ * appreciably above it is a boundary wall (3.2) or a fence (2.3) and is not a
+ * place the cat is allowed to be. Without this, one legitimate climb chains
+ * into another until the cat is standing on the outside of the level.
+ */
+export const MAX_PERCH_HEIGHT = 2.35;
+/** Keep landings this far inside the world's own walls. */
+const BOUNDS_MARGIN = 0.45;
 /** Coil before an authored leap. Long enough to read, short enough to obey. */
 const JUMP_GATHER = 0.12;
 /** Front-contact-to-recovered window after an authored landing. */
@@ -227,6 +238,7 @@ export class CatController {
     // does not move until the world steps, one call later.
     this.position.copy(result.position);
 
+    this.containWithinWorld();
     this.reconcile(dt, result.grounded, result.translation.y);
     // The coil aims the cat at its landing itself; letting the stick fight that
     // would be a player steering a jump that is already committed.
@@ -339,20 +351,19 @@ export class CatController {
         ? { height: target.landing[1], distance: Math.hypot(target.landing[0] - this.position.x, target.landing[2] - this.position.z) }
         : this.probeLedge();
 
-      if (target) {
+      if (target && this.isLegalLanding(target.landing[0], target.landing[1], target.landing[2])) {
         this.beginGather(target.landing[0], target.landing[1], target.landing[2], target);
         return;
       }
       if (ledge && ledge.height > this.position.y + 0.06) {
         // Land just past the lip of whatever was probed.
         const reach = ledge.distance + CAT_RADIUS + 0.3;
-        this.beginGather(
-          this.position.x + Math.sin(this.facing) * reach,
-          ledge.height,
-          this.position.z + Math.cos(this.facing) * reach,
-          null,
-        );
-        return;
+        const landingX = this.position.x + Math.sin(this.facing) * reach;
+        const landingZ = this.position.z + Math.cos(this.facing) * reach;
+        if (this.isLegalLanding(landingX, ledge.height, landingZ)) {
+          this.beginGather(landingX, ledge.height, landingZ, null);
+          return;
+        }
       }
       {
         // A plain hop: no ledge to commit to, so ballistics take it from here.
@@ -459,6 +470,7 @@ export class CatController {
       this.arcStart.y + (this.arcEnd.y - this.arcStart.y) * u + Math.sin(u * Math.PI) * this.arcHeight,
       this.arcStart.z + (this.arcEnd.z - this.arcStart.z) * horizontal,
     );
+    this.containWithinWorld();
     this.body.setFeetPosition(this.position);
 
     // A leap the coil could not finish aiming keeps turning in the air, so the
@@ -513,6 +525,33 @@ export class CatController {
     };
   }
 
+  /**
+   * Whether a leap is allowed to end here.
+   *
+   * The last line of defence, applied to authored targets and probed ledges
+   * alike. The probe already refuses walls and fences, but a landing is also
+   * illegal if it is above the authored traversal or outside the level, and
+   * this catches both — including an authored target someone mistypes.
+   */
+  private isLegalLanding(x: number, y: number, z: number): boolean {
+    if (y > MAX_PERCH_HEIGHT) return false;
+    return x > WORLD.minX + BOUNDS_MARGIN && x < WORLD.maxX - BOUNDS_MARGIN
+      && z > WORLD.minZ + BOUNDS_MARGIN && z < WORLD.maxZ - BOUNDS_MARGIN;
+  }
+
+  /**
+   * Keeps the cat inside the level, whatever put it here.
+   *
+   * The landing guard covers every leap the game offers, but a plain ballistic
+   * hop, an authored arc, and a collision solve are all separate routes to the
+   * same place. This is the cheap final net: the cat is never outside the walls
+   * even for a frame, so there is nothing to escape *from*.
+   */
+  private containWithinWorld(): void {
+    this.position.x = clamp(this.position.x, WORLD.minX + CAT_RADIUS, WORLD.maxX - CAT_RADIUS);
+    this.position.z = clamp(this.position.z, WORLD.minZ + CAT_RADIUS, WORLD.maxZ - CAT_RADIUS);
+  }
+
   private probeLedge(): { height: number; distance: number } | null {
     const probe = this.physics.probeLedge(this.position, this.facing, LEDGE_REACH, MAX_LEDGE_HEIGHT);
     return probe ? { height: probe.height, distance: probe.distance } : null;
@@ -531,6 +570,7 @@ export class CatController {
       // Must be below the landing and roughly facing it.
       const rise = target.landing[1] - this.position.y;
       if (rise < 0.12 || rise > MAX_LEDGE_HEIGHT) continue;
+      if (!this.isLegalLanding(target.landing[0], target.landing[1], target.landing[2])) continue;
       const toLanding = Math.atan2(target.landing[0] - this.position.x, target.landing[2] - this.position.z);
       const facingDot = Math.cos(shortestAngle(this.facing, toLanding));
       // A cat sizing up a jump does not have to already be pointing at it, so a

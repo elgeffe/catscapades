@@ -30,5 +30,8 @@
 - [ ] Drop a carried item into the running sink and confirm the splash.
 - [ ] Let the sink overflow, walk through the puddle, and confirm wet pawprints appear, fade over time, and draw the homeowner when they see them.
 - [ ] Shred the flour bag, walk through it, and confirm the floury tracks last far longer and are noticed from further away.
+- [ ] Climb counter → worktop → wall shelf and try to jump onto the wall from every angle; confirm you always land back on the shelf.
+- [ ] Climb the garden planter and try to jump the fence; confirm you cannot leave the garden.
+- [ ] Walk the whole outer boundary of the garden and both rooms and confirm you are never outside the walls.
 - [ ] Toggle diagnostics with backquote and inspect coordinates, NPC state, camera zone, the vision cone, and render statistics.
 - [ ] Preview `dist/` and smoke-test the deployed GitHub Pages URL and reload.

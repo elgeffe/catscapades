@@ -193,11 +193,11 @@ export function buildOwner(): OwnerRig {
   // skull so it sits on the head instead of hovering over it.
   const hairShell = new THREE.Mesh(
     buildOwnerLoft([
-      { at: 0.152, halfWidth: 0.134, halfDepth: 0.138, offsetZ: 0.001 },
-      { at: 0.19, halfWidth: 0.133, halfDepth: 0.133, offsetZ: -0.005 },
-      { at: 0.24, halfWidth: 0.128, halfDepth: 0.126, offsetZ: -0.015 },
-      { at: 0.29, halfWidth: 0.106, halfDepth: 0.103, offsetZ: -0.021 },
-      { at: 0.33, halfWidth: 0.056, halfDepth: 0.055, offsetZ: -0.023 },
+      { at: 0.188, halfWidth: 0.133, halfDepth: 0.133, offsetZ: -0.004 },
+      { at: 0.222, halfWidth: 0.131, halfDepth: 0.129, offsetZ: -0.011 },
+      { at: 0.262, halfWidth: 0.122, halfDepth: 0.119, offsetZ: -0.018 },
+      { at: 0.3, halfWidth: 0.099, halfDepth: 0.096, offsetZ: -0.022 },
+      { at: 0.335, halfWidth: 0.052, halfDepth: 0.051, offsetZ: -0.023 },
     ], { radialSegments: 16, capStart: false }),
     hair,
   );
@@ -211,23 +211,20 @@ export function buildOwner(): OwnerRig {
   bun.position.set(0, 0.126, -0.128);
   head.add(bun);
 
+  // Face features sit *proud* of the lofted head. There is no recessed socket
+  // any more: it was authored to sit inside the surface, which only ever
+  // looked like anything while the head's own faces were wound inside out and
+  // you could see through them. `owner.test.ts` raycasts each feature now.
   for (const side of [-1, 1] as const) {
-    // Recessed into the brow's shadow rather than sitting on the surface.
-    const socket = new THREE.Mesh(new THREE.SphereGeometry(0.032, 10, 8), skin);
-    socket.name = side < 0 ? "eye-socket-left" : "eye-socket-right";
-    socket.scale.set(1.05, 0.72, 0.5);
-    socket.position.set(side * 0.052, 0.176, 0.104);
-    head.add(socket);
-
     const eye = new THREE.Mesh(new THREE.SphereGeometry(0.019, 10, 8), surface(0x2b2521, { roughness: 0.3 }));
     eye.name = side < 0 ? "eye-left" : "eye-right";
     eye.scale.set(1, 0.78, 0.42);
-    eye.position.set(side * 0.052, 0.173, 0.121);
+    eye.position.set(side * 0.052, 0.173, 0.128);
     head.add(eye);
 
     const eyebrow = new THREE.Mesh(new THREE.BoxGeometry(0.056, 0.014, 0.016), hair);
     eyebrow.name = side < 0 ? "eyebrow-left" : "eyebrow-right";
-    eyebrow.position.set(side * 0.054, 0.212, 0.113);
+    eyebrow.position.set(side * 0.054, 0.212, 0.126);
     eyebrow.rotation.z = side * 0.12;
     head.add(eyebrow);
 
@@ -242,7 +239,7 @@ export function buildOwner(): OwnerRig {
     ear.name = side < 0 ? "ear-left" : "ear-right";
     // Laid flat against the skull. Standing off it reads as a bead stuck on
     // the side of the head rather than an ear.
-    ear.position.set(side * 0.118, 0.148, -0.016);
+    ear.position.set(side * 0.124, 0.148, -0.016);
     ear.rotation.z = side * -0.16;
     head.add(ear);
   }
@@ -263,7 +260,7 @@ export function buildOwner(): OwnerRig {
 
   const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.056, 0.007, 0.01), surface(0x9a6357, { roughness: 0.8 }));
   mouth.name = "mouth";
-  mouth.position.set(0, 0.084, 0.126);
+  mouth.position.set(0, 0.084, 0.135);
   head.add(mouth);
 
   // -- arms -----------------------------------------------------------------

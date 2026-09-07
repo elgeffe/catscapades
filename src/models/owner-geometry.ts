@@ -99,9 +99,14 @@ export function buildOwnerLoft(
     const next = (row + 1) * radialSegments;
     for (let radial = 0; radial < radialSegments; radial += 1) {
       const step = (radial + 1) % radialSegments;
+      // Wound so the side faces point *outwards*. Reversing these does not
+      // fail loudly: back-face culling then shows the far side's interior
+      // through the near surface, which reads as the whole figure being
+      // faintly transparent, and `computeVertexNormals` lights it inside out.
+      // `owner.test.ts` asserts the direction rather than trusting the order.
       indices.push(
-        base + radial, next + radial, base + step,
-        base + step, next + radial, next + step,
+        base + radial, base + step, next + radial,
+        base + step, next + step, next + radial,
       );
     }
   }
@@ -262,13 +267,16 @@ export function buildOwnerShoeGeometry(): THREE.BufferGeometry {
       );
     }
   }
+  // Outward-facing, like the lofts above. The profile is traversed clockwise
+  // in XY, so the sides wind the opposite way round from a counter-clockwise
+  // ring would.
   for (let row = 0; row < sections.length - 1; row += 1) {
     const base = row * ring;
     const next = (row + 1) * ring;
     for (let radial = 0; radial < ring; radial += 1) {
       const step = (radial + 1) % ring;
-      indices.push(base + radial, base + step, next + radial);
-      indices.push(base + step, next + step, next + radial);
+      indices.push(base + radial, next + radial, base + step);
+      indices.push(base + step, next + radial, next + step);
     }
   }
   const heel = sections[0]!;
@@ -277,11 +285,12 @@ export function buildOwnerShoeGeometry(): THREE.BufferGeometry {
   positions.push(0, heel.bottom + (heel.top - heel.bottom) * 0.45, heel.z);
   const toeCentre = positions.length / 3;
   positions.push(0, toe.bottom + (toe.top - toe.bottom) * 0.45, toe.z);
+  // The heel cap faces -Z and the toe cap +Z.
   for (let radial = 0; radial < ring; radial += 1) {
     const step = (radial + 1) % ring;
-    indices.push(heelCentre, step, radial);
+    indices.push(heelCentre, radial, step);
     const base = (sections.length - 1) * ring;
-    indices.push(toeCentre, base + radial, base + step);
+    indices.push(toeCentre, base + step, base + radial);
   }
 
   const geometry = new THREE.BufferGeometry();
